@@ -30,7 +30,7 @@ else:
 
 # Step 2. Calculate the coordinates of the relevant intersection point of circles 1 and 2:
 
-# Equation 6:
+# Equation 6: 
 x12 = (r1 ** 2 - r2 ** 2 + d12 ** 2) / (2 * d12)
 y12 = (1 / (2 * d12)) * sqrt(
     2 * d12 ** 2 * (r1 ** 2 + r2 ** 2) - (r1 ** 2 - r2 ** 2) ** 2 - d12 ** 4
