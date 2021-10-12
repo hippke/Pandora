@@ -1,5 +1,5 @@
 ![Logo](https://github.com/hippke/Pandora/blob/main/docs/source/logo.png?raw=true)
-## A fast transit-fitting algorithm to search for exomoons
+## Fast open-source exomoon transit detection algorithm
 
 [![pip](https://img.shields.io/badge/pip-install%20pandora--moon-blue.svg)](https://pypi.org/project/wotan/)
 [![Documentation](https://img.shields.io/badge/documentation-%E2%9C%93-blue.svg)](https://wotan.readthedocs.io/en/latest/index.html)
