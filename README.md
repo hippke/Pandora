@@ -12,3 +12,4 @@ Pandora is an analytical photodynamical model, including:
 - Stellar limb darkening
 - Full and partial planet-moon eclipses
 - Barycentric motion of planet and moon
+- Bayesian evidence calculation
