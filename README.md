@@ -13,3 +13,4 @@ Pandora employs an analytical photodynamical model, including:
 - Full and partial planet-moon eclipses
 - Barycentric motion of planet and moon
 - Bayesian evidence calculation
+- Nested sampling with `UltraNest'
