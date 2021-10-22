@@ -12,5 +12,5 @@ Pandora employs an analytical photodynamical model, including:
 - Stellar limb darkening
 - Full and partial planet-moon eclipses
 - Barycentric motion of planet and moon
-- Bayesian evidence calculation
 - Nested sampling with [UltraNest](https://github.com/JohannesBuchner/UltraNest)
+- Bayesian evidence calculation
