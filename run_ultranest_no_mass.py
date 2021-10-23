@@ -32,22 +32,33 @@ def prior_transform(cube):
     params[3]  = cube[3]  * 200 + 1 # Omega_moon
     params[4]  = cube[4]  * 90 # w_moon
     params[5]  = cube[5]  * 90 # i_moon
-    params[6]  = cube[6]  * 2e22 + 5e22  # M_moon
-    params[7]  = cube[7]  * 10 + 360 # per_planet
-    params[8]  = cube[8]  * 14959787 + 142117976.5 # a_planet
-    params[9]  = cube[9]  * 100000 # r_planet
-    params[10] = cube[10] # b_planet
-    params[11] = cube[11] - 0.5 # t0_planet
-    params[12] = cube[12] * 2e24 + 5e24 # M_planet
+    #params[6]  = cube[6]  * 2e22 + 5e22  # M_moon
+    params[6]  = cube[6]  * 10 + 360 # per_planet
+    params[7]  = cube[7]  * 14959787 + 142117976.5 # a_planet
+    params[8]  = cube[8]  * 100000 # r_planet
+    params[9] = cube[9] # b_planet
+    params[10] = cube[10] - 0.5 # t0_planet
+    #params[12] = cube[12] * 2e24 + 5e24 # M_planet
     return params
 
 
 @jit(cache=True, nopython=True, fastmath=True)
 def log_likelihood(params):
-
-    r_moon,a_moon,tau_moon,Omega_moon,w_moon,i_moon,M_moon,per_planet,a_planet,r_planet,b_planet,t0_planet,M_planet = params
+    M_moon = 6e22
+    M_planet = 6e24
+    r_moon = params[0]
+    a_moon = params[1]
+    tau_moon = params[2]
+    Omega_moon = params[3]
+    w_moon = params[4]
+    i_moon = params[5]
+    per_planet = params[6]
+    a_planet = params[7]
+    r_planet = params[8]
+    b_planet = params[9]
+    t0_planet = params[10]
     _, _, flux_total, _, _, _, _ = pandora_model(
-        r_moon, a_moon,per_moon,tau_moon,Omega_moon,w_moon,i_moon,per_planet,a_planet,r_planet,b_planet,t0_planet,M_planet,
+        r_moon,a_moon,tau_moon,Omega_moon,w_moon,i_moon,M_moon,per_planet,a_planet,r_planet,b_planet,t0_planet,M_planet,
         R_star=1 * 696342,  # km
         u=u,
         time=time_array
@@ -133,7 +144,7 @@ flux_planet, flux_moon, flux_total, px_bary, py_bary, mx_bary, my_bary = pandora
 
 
 # Create noise and merge with flux
-stdev = 5e-4
+stdev = 1e-5
 noise = np.random.normal(0, stdev, len(time_array))
 testdata = flux_total + noise
 yerr = np.full(len(time_array), stdev)
@@ -156,21 +167,17 @@ parameters = [
     'Omega_moon',
     'w_moon',
     'i_moon',
-    'M_moon',
     'per_planet',
     'a_planet',
     'r_planet',
     'b_planet',
     't0_planet',
-    'M_planet'
     ]
 
-sampler2 = ReactiveNestedSampler(parameters, log_likelihood, prior_transform,
+sampler = ReactiveNestedSampler(parameters, log_likelihood, prior_transform,
     wrapped_params=[
     False,
-    False,
     True, 
-    False, 
     False, 
     False, 
     False, 
@@ -182,27 +189,10 @@ sampler2 = ReactiveNestedSampler(parameters, log_likelihood, prior_transform,
     False
     ],
 )
-
-import ultranest.stepsampler
-import ultranest
-
-nsteps = 2 * len(parameters)
-sampler2.stepsampler = ultranest.stepsampler.RegionSliceSampler(nsteps=nsteps)
-result2 = sampler2.run(min_num_live_points=400)#, show_status=False)#, viz_callback=None)
-sampler2.print_results()
+result = sampler.run(min_num_live_points=400, dKL=np.inf, min_ess=100)
+sampler.print_results()
 
 
-#cornerplot(result2)
-#plt.show()
-"""
-plt.figure()
-plt.xlabel('x')
-plt.ylabel('y')
-plt.errorbar(x=t, y=y, yerr=yerr,
-             marker='o', ls=' ', color='orange')
-
-plt.show()
-"""
 
 #cornerplot(result)
 """

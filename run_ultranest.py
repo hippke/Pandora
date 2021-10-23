@@ -133,7 +133,7 @@ flux_planet, flux_moon, flux_total, px_bary, py_bary, mx_bary, my_bary = pandora
 
 
 # Create noise and merge with flux
-stdev = 5e-4
+stdev = 1e-5
 noise = np.random.normal(0, stdev, len(time_array))
 testdata = flux_total + noise
 yerr = np.full(len(time_array), stdev)
@@ -165,7 +165,7 @@ parameters = [
     'M_planet'
     ]
 
-sampler2 = ReactiveNestedSampler(parameters, log_likelihood, prior_transform,
+sampler = ReactiveNestedSampler(parameters, log_likelihood, prior_transform,
     wrapped_params=[
     False,
     False,
@@ -181,28 +181,14 @@ sampler2 = ReactiveNestedSampler(parameters, log_likelihood, prior_transform,
     False, 
     False
     ],
+    ndraw_min=1000000,
+    ndraw_max=2000000
+
 )
-
-import ultranest.stepsampler
-import ultranest
-
-nsteps = 2 * len(parameters)
-sampler2.stepsampler = ultranest.stepsampler.RegionSliceSampler(nsteps=nsteps)
-result2 = sampler2.run(min_num_live_points=400)#, show_status=False)#, viz_callback=None)
-sampler2.print_results()
+result = sampler.run(min_num_live_points=400, dKL=np.inf)
+sampler.print_results()
 
 
-#cornerplot(result2)
-#plt.show()
-"""
-plt.figure()
-plt.xlabel('x')
-plt.ylabel('y')
-plt.errorbar(x=t, y=y, yerr=yerr,
-             marker='o', ls=' ', color='orange')
-
-plt.show()
-"""
 
 #cornerplot(result)
 """

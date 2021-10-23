@@ -4,9 +4,11 @@ from numpy import sin, pi
 import matplotlib.pyplot as plt
 from ultranest import ReactiveNestedSampler
 from ultranest.plot import cornerplot
-from pandora import pandora_model
+from pandora import pandora
 from numba import jit
 
+
+@jit(cache=True, nopython=True, fastmath=True)
 def prior_transform(cube):
     # the argument, cube, consists of values from 0 to 1
     # we have to convert them to physical scales
@@ -37,7 +39,7 @@ def prior_transform(cube):
     params[8]  = cube[8]  * 14959787 + 142117976.5 # a_planet
     params[9]  = cube[9]  * 100000 # r_planet
     params[10] = cube[10] # b_planet
-    params[11] = cube[11] - 0.5 # t0_planet
+    params[11] = cube[11] - 0.5 # t0_planet_offset
     params[12] = cube[12] * 2e24 + 5e24 # M_planet
     return params
 
@@ -45,22 +47,36 @@ def prior_transform(cube):
 @jit(cache=True, nopython=True, fastmath=True)
 def log_likelihood(params):
 
-    r_moon,a_moon,tau_moon,Omega_moon,w_moon,i_moon,M_moon,per_planet,a_planet,r_planet,b_planet,t0_planet,M_planet = params
-    _, _, flux_total, _, _, _, _ = pandora_model(
-        r_moon, a_moon,per_moon,tau_moon,Omega_moon,w_moon,i_moon,per_planet,a_planet,r_planet,b_planet,t0_planet,M_planet,
+    r_moon,a_moon,tau_moon,Omega_moon,w_moon,i_moon,M_moon,per_planet,a_planet,r_planet,b_planet,t0_planet_offset,M_planet = params
+    flux_planet, flux_moon, flux_total, px_bary, py_bary, mx_bary, my_bary, time_arrays = pandora(
+        r_moon,
+        a_moon,
+        tau_moon,
+        Omega_moon,
+        w_moon,
+        i_moon,
+        M_moon,
+        per_planet,
+        a_planet,
+        r_planet,
+        b_planet,
+        t0_planet_offset,
+        M_planet,
         R_star=1 * 696342,  # km
         u=u,
-        time=time_array
+        t0_planet=t0_planet,
+        epochs=epochs,
+        epoch_duration=epoch_duration,
+        cadences_per_day=cadences_per_day
     )
     loglike = -0.5 * (((flux_total - testdata) / yerr)**2).sum()
     return loglike
 
 
 
-# Create model to be recovered later
 np.random.seed(seed=42)  # reproducibility
-t_start = 101
-t_end = 104
+t_start = 100
+t_end = 114
 t_dur = t_end - t_start
 cadences_per_day = 48
 cadences = int(cadences_per_day * t_dur)
@@ -81,11 +97,12 @@ b_planet = 0.0  # [0..1.x]; central transit is 0.
 per_planet = 365.25  # [days]
 M_planet = 5.972 * 10 ** 24
 #M_sun = 2e30
-
+t0_planet_offset = 0.1
 transit_duration_planet = per_planet / pi * arcsin(sqrt(((r_planet/2) + R_star) ** 2) / a_planet)
 
 # Set moon parameters
-r_moon_fake = 18000  # [km]
+# Set moon parameters
+r_moon = 18000  # [km]
 a_moon = 384000 * 3  # [km]
 Omega_moon = 10#20  # degrees
 w_moon = 20#50.0  # degrees
@@ -97,23 +114,25 @@ per_moon = (2 * pi * sqrt((a_moon * 1000) ** 3 / (G * M_planet))) / 60 / 60 / 24
 
 M_moon = 6e22
 
-#print("moon period (days)", per_moon)
-# OK to keep planetary transit duration at b=0 as the star is always R=1
-#print("transit_duration (days, b=0)", transit_duration_planet)
+u = np.array([[u1, u2]])
 
 
-t0_planet = 0.1
+# Model with 5 epochs:
+# t0_planet_offset must be constant for all
+# new variable: t0_planet: Time (in days) of first planet mid-transit in time series
 
-# Set planet parameters
-r_planet = 63710  # km
-a_planet = 1 * 149597870.700  # [km]
-b_planet = 0.0  # [0..1.x]; central transit is 0.
-per_planet = 365.25  # [days]
+# Example: First planet mid-transit at time t0_planet = 100  # days
+t0_planet = 100  # days
+epochs = 5
+
+# Each epoch must contain a segment of data, centered at the planetary transit
+# Each epoch must be the same time duration
+epoch_duration = 3  # days
+cadences_per_day = 48  # switch this to automatic calculation? What about gaps?
 
 
-# Array form:
-flux_planet, flux_moon, flux_total, px_bary, py_bary, mx_bary, my_bary = pandora_model(
-    r_moon_fake,
+flux_planet, flux_moon, flux_total, px_bary, py_bary, mx_bary, my_bary, time_arrays = pandora(
+    r_moon,
     a_moon,
     tau_moon,
     Omega_moon,
@@ -124,27 +143,28 @@ flux_planet, flux_moon, flux_total, px_bary, py_bary, mx_bary, my_bary = pandora
     a_planet,
     r_planet,
     b_planet,
-    t0_planet,
+    t0_planet_offset,
     M_planet,
     R_star,
     u,
-    time_array
-    )
+    t0_planet,
+    epochs,
+    epoch_duration,
+    cadences_per_day
+)
 
 
 # Create noise and merge with flux
-stdev = 5e-4
-noise = np.random.normal(0, stdev, len(time_array))
-testdata = flux_total + noise
-yerr = np.full(len(time_array), stdev)
-#print(yerr)
+stdev = 1e-4
+noise = np.random.normal(0, stdev, len(time_arrays))
+testdata = noise + flux_total
+yerr = np.full(len(testdata), stdev)
 
-plt.plot(time_array, flux_planet, color="blue")
-plt.plot(time_array, flux_moon, color="red")
-plt.plot(time_array, flux_total, color="green", linestyle="dashed")
-plt.scatter(time_array, testdata, s=20, marker="x", color="black")
+plt.plot(time_arrays, flux_planet, color="blue")
+plt.plot(time_arrays, flux_moon, color="red")
+plt.plot(time_arrays, flux_total, color="black")
+plt.scatter(time_arrays, testdata, color="black", s=5)
 plt.show()
-
 
 
 # Recover the test data
@@ -188,7 +208,7 @@ import ultranest
 
 nsteps = 2 * len(parameters)
 sampler2.stepsampler = ultranest.stepsampler.RegionSliceSampler(nsteps=nsteps)
-result2 = sampler2.run(min_num_live_points=400)#, show_status=False)#, viz_callback=None)
+result2 = sampler2.run(min_num_live_points=400, update_interval_ncall=1000)
 sampler2.print_results()
 
 

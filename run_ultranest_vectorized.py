@@ -4,13 +4,13 @@ from numpy import sin, pi
 import matplotlib.pyplot as plt
 from ultranest import ReactiveNestedSampler
 from ultranest.plot import cornerplot
-from pandora import pandora_model
+from pandora import pandora_model, pandora_vectorized
 from numba import jit
 
 def prior_transform(cube):
     # the argument, cube, consists of values from 0 to 1
     # we have to convert them to physical scales
-
+    #print("len cube", len(cube))
     # 0  r_moon
     # 1  a_moon
     # 2  tau_moon
@@ -26,34 +26,54 @@ def prior_transform(cube):
     # 12 M_planet
 
     params     = cube.copy()
-    params[0]  = cube[0]  * 25000 + 1 # r_moon (0, 25000) [km]
-    params[1]  = cube[1]  * 2000000 + 20000 # a_moon (20000, 2_020_000) [km]
-    params[2]  = cube[2]  # tau_moon (normalized 0..1)
-    params[3]  = cube[3]  * 200 + 1 # Omega_moon
-    params[4]  = cube[4]  * 90 # w_moon
-    params[5]  = cube[5]  * 90 # i_moon
-    params[6]  = cube[6]  * 2e22 + 5e22  # M_moon
-    params[7]  = cube[7]  * 10 + 360 # per_planet
-    params[8]  = cube[8]  * 14959787 + 142117976.5 # a_planet
-    params[9]  = cube[9]  * 100000 # r_planet
-    params[10] = cube[10] # b_planet
-    params[11] = cube[11] - 0.5 # t0_planet
-    params[12] = cube[12] * 2e24 + 5e24 # M_planet
+    params[:,0]  = cube[:,0]  * 25000 + 1 # r_moon (0, 25000) [km]
+    params[:,1]  = cube[:,1]  * 2000000 + 20000 # a_moon (20000, 2_020_000) [km]
+    params[:,2]  = cube[:,2]  # tau_moon (normalized 0..1)
+    params[:,3]  = cube[:,3]  * 200 + 1 # Omega_moon
+    params[:,4]  = cube[:,4]  * 90 # w_moon
+    params[:,5]  = cube[:,5]  * 90 # i_moon
+    params[:,6]  = cube[:,6]  * 2e22 + 5e22  # M_moon
+    params[:,7]  = cube[:,7]  * 10 + 360 # per_planet
+    params[:,8]  = cube[:,8]  * 14959787 + 142117976.5 # a_planet
+    params[:,9]  = cube[:,9]  * 100000 # r_planet
+    params[:,10] = cube[:,10] # b_planet
+    params[:,11] = cube[:,11] - 0.5 # t0_planet
+    params[:,12] = cube[:,12] * 2e24 + 5e24 # M_planet
     return params
 
 
-@jit(cache=True, nopython=True, fastmath=True)
+@jit(cache=False, nopython=True, fastmath=True)
 def log_likelihood(params):
-
-    r_moon,a_moon,tau_moon,Omega_moon,w_moon,i_moon,M_moon,per_planet,a_planet,r_planet,b_planet,t0_planet,M_planet = params
-    _, _, flux_total, _, _, _, _ = pandora_model(
-        r_moon, a_moon,per_moon,tau_moon,Omega_moon,w_moon,i_moon,per_planet,a_planet,r_planet,b_planet,t0_planet,M_planet,
+    #print(params)
+    r_moon = params[:,0]
+    a_moon = params[:,1]
+    tau_moon = params[:,2]
+    Omega_moon = params[:,3]
+    w_moon = params[:,4]
+    i_moon = params[:,5]
+    M_moon = params[:,6]
+    per_planet = params[:,7]
+    a_planet = params[:,8]
+    r_planet = params[:,9]
+    b_planet = params[:,10]
+    t0_planet = params[:,11]
+    M_planet = params[:,12]
+    #print("Omega_moon", Omega_moon)
+    flux_total_array = pandora_vectorized(
+        r_moon, a_moon,tau_moon,Omega_moon,w_moon,i_moon,M_moon,per_planet,a_planet,r_planet,b_planet,t0_planet,M_planet,
         R_star=1 * 696342,  # km
         u=u,
         time=time_array
     )
-    loglike = -0.5 * (((flux_total - testdata) / yerr)**2).sum()
-    return loglike
+    #loglikes = -0.5 * (((flux_total - testdata) / yerr)**2).sum()
+
+    loglikes = np.ones(len(flux_total_array))
+    for idx in range(len(flux_total_array)):
+        loglike = -0.5 * ((flux_total_array[idx] - testdata) / yerr**2).sum()
+        loglikes[idx] = loglike
+
+    #print(loglikes)
+    return loglikes
 
 
 
@@ -133,7 +153,7 @@ flux_planet, flux_moon, flux_total, px_bary, py_bary, mx_bary, my_bary = pandora
 
 
 # Create noise and merge with flux
-stdev = 5e-4
+stdev = 1e-5
 noise = np.random.normal(0, stdev, len(time_array))
 testdata = flux_total + noise
 yerr = np.full(len(time_array), stdev)
@@ -165,44 +185,31 @@ parameters = [
     'M_planet'
     ]
 
-sampler2 = ReactiveNestedSampler(parameters, log_likelihood, prior_transform,
+sampler = ReactiveNestedSampler(
+    parameters,
+    log_likelihood,
+    prior_transform,
     wrapped_params=[
-    False,
-    False,
-    True, 
-    False, 
-    False, 
-    False, 
-    False, 
-    False, 
-    False, 
-    False, 
-    False, 
-    False, 
-    False
+        False,
+        False,
+        True, 
+        False, 
+        False, 
+        False, 
+        False, 
+        False, 
+        False, 
+        False, 
+        False, 
+        False, 
+        False
     ],
+    vectorized=True
 )
-
-import ultranest.stepsampler
-import ultranest
-
-nsteps = 2 * len(parameters)
-sampler2.stepsampler = ultranest.stepsampler.RegionSliceSampler(nsteps=nsteps)
-result2 = sampler2.run(min_num_live_points=400)#, show_status=False)#, viz_callback=None)
-sampler2.print_results()
+result = sampler.run(min_num_live_points=400, dKL=np.inf, min_ess=100)
+sampler.print_results()
 
 
-#cornerplot(result2)
-#plt.show()
-"""
-plt.figure()
-plt.xlabel('x')
-plt.ylabel('y')
-plt.errorbar(x=t, y=y, yerr=yerr,
-             marker='o', ls=' ', color='orange')
-
-plt.show()
-"""
 
 #cornerplot(result)
 """

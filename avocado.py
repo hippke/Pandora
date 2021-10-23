@@ -4,12 +4,11 @@ from numba import jit
 @jit(cache=False, nopython=True, fastmath=True)
 def ellipse_pos(a, per, tau, Omega, w, i, time):
     """2D x-y Kepler solver without eccentricity and mass"""
-#    Q = 2 * arctan(tan((pi * (time - tau) / per))) + (pi * w) / 180
+    #Q = 2 * arctan(tan((pi * (time - tau) / per))) + (pi * w) / 180
     
     # Scale tau to period
-    tau = tau * per
+    tau = tau * (per)
 
-    #print(tau)
     Q = 2 * arctan(tan((pi * (time - tau) / per))) + (pi * w) / 180
     V = sin(Q) * cos((i / 180 * pi))
     O = Omega / 180 * pi
