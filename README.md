@@ -16,7 +16,7 @@ Pandora employs an analytical photodynamical model, including:
 - Bayesian evidence calculation
 
 ### Installation
-Try installing with ``pip install pandora''. If that doesn't work, set up a fresh [miniconda](https://docs.conda.io/en/latest/miniconda.html) environment:
+Try installing with `pip install pandora`. If that doesn't work, set up a fresh [miniconda](https://docs.conda.io/en/latest/miniconda.html) environment:
 ```
 conda create -n pandora python=3.10
 conda install cython
