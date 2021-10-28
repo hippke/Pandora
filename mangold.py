@@ -5,7 +5,7 @@ HALF_PI = 0.5 * pi
 INV_PI = 1 / pi
 
 
-@jit(cache=True, nopython=True, fastmath=True)
+@jit(cache=False, nopython=True, fastmath=True)
 def ellpicb(n, k):
     """The complete elliptical integral of the third kind
     Bulirsch 1965, Numerische Mathematik, 7, 78
@@ -41,7 +41,7 @@ def ellpicb(n, k):
     return 0
 
 
-@jit(cache=True, nopython=True, fastmath=True)
+@jit(cache=False, nopython=True, fastmath=True)
 def ellec(k):
     a1 = 0.443251414630
     a2 = 0.062606012200
@@ -57,7 +57,7 @@ def ellec(k):
     )
 
 
-@jit(cache=True, nopython=True, fastmath=True)
+@jit(cache=False, nopython=True, fastmath=True)
 def ellk(k):
     a0 = 1.386294361120
     a1 = 0.096663442590
@@ -75,7 +75,7 @@ def ellk(k):
     )
 
 
-@jit(cache=True, nopython=True, fastmath=True, parallel=False)
+@jit(cache=False, nopython=True, fastmath=True, parallel=False)
 def occult_array(zs, k, u: ndarray):
     """Evaluates the transit model for an array of normalized distances.
     Parameters
@@ -95,7 +95,6 @@ def occult_array(zs, k, u: ndarray):
 
     npt = len(zs)
     npb = u.shape[0]
-
     k2 = k ** 2
     omega = zeros(npb)
     flux = zeros((npt, npb))
@@ -255,7 +254,7 @@ def occult_array(zs, k, u: ndarray):
     return ravel(flux)
 
 
-@jit(cache=True, nopython=True, fastmath=True)
+@jit(cache=False, nopython=True, fastmath=True)
 def occult_single(z: float, k: float, u: ndarray):
     """Evaluates the transit model for scalar normalized distance.
     Parameters

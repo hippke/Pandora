@@ -27,7 +27,6 @@ u2 = 0.5
 r_moon = 18000  # [km]
 a_moon = 384000 * 1   # [km]
 Omega_moon = 10#20  # degrees
-w_moon = 20#50.0  # degrees
 i_moon = 80 #60.0  # 0..90 in degrees. 90 is edge on
 tau_moon = 0
 #mass_ratio = 0.1
@@ -35,13 +34,13 @@ tau_moon = 0
 M_moon = 6e22
 M_planet = 6e24
 
-t0_planet_offset = 1
+t0_planet_offset = 0.1
 
 # Set planet parameters
 r_planet = 63710 / 2  # km
 a_planet = 1 * 149597870.700  # [km]
 b_planet = 0.0  # [0..1.x]; central transit is 0.
-per_planet = 365.25  # [days]
+per_planet = 365.25 +0.1 # [days]
 
 u = np.array([[u1, u2]])
 
@@ -52,12 +51,16 @@ u = np.array([[u1, u2]])
 
 # Example: First planet mid-transit at time t0_planet = 100  # days
 t0_planet = 100  # days
-epochs = 5
+epochs = 10
+epoch_distance = 365.25
 
 # Each epoch must contain a segment of data, centered at the planetary transit
 # Each epoch must be the same time duration
-epoch_duration = 3  # days
+epoch_duration = 2.5  # days
 cadences_per_day = 48  # switch this to automatic calculation? What about gaps?
+
+
+import time as ttime
 
 
 flux_planet, flux_moon, flux_total, px_bary, py_bary, mx_bary, my_bary, time_arrays = pandora(
@@ -65,7 +68,6 @@ flux_planet, flux_moon, flux_total, px_bary, py_bary, mx_bary, my_bary, time_arr
     a_moon,
     tau_moon,
     Omega_moon,
-    w_moon,
     i_moon,
     M_moon,
     per_planet,
@@ -79,9 +81,36 @@ flux_planet, flux_moon, flux_total, px_bary, py_bary, mx_bary, my_bary, time_arr
     t0_planet,
     epochs,
     epoch_duration,
-    cadences_per_day
+    cadences_per_day,
+    epoch_distance
 )
-
+t1 = ttime.time()
+for idx in range(8000):
+	flux_planet, flux_moon, flux_total, px_bary, py_bary, mx_bary, my_bary, time_arrays = pandora(
+		r_moon,
+	    a_moon,
+	    tau_moon,
+	    Omega_moon,
+	    i_moon,
+	    M_moon,
+	    per_planet,
+	    a_planet,
+	    r_planet,
+	    b_planet,
+	    t0_planet_offset,
+	    M_planet,
+	    R_star,
+	    u,
+	    t0_planet,
+	    epochs,
+	    epoch_duration,
+	    cadences_per_day,
+	    epoch_distance
+	)
+t2 = ttime.time()
+print()
+print("Runtime", t2-t1)
+#assert np.sum(flux_total)==719.5908986976355
 
 # Create noise and merge with flux
 stdev = 1e-5

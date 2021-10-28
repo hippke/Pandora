@@ -1,12 +1,11 @@
 from numba import jit, prange
 from numpy import sqrt, pi, arcsin
 import numpy as np
-import numba as nb
 
 from avocado import ellipse_pos, bary_pos
 from mangold import occult_single, occult_array
-
 # from pumpkin import eclipse_ratio
+
 G = 6.67408 * 10 ** -11
 
 @jit(cache=False, nopython=True, fastmath=True, parallel=False)
@@ -15,7 +14,6 @@ def pandora_epoch(
     a_moon,
     tau_moon,
     Omega_moon,
-    w_moon,
     i_moon,
     M_moon,
     per_planet,
@@ -27,11 +25,13 @@ def pandora_epoch(
     R_star,
     u,
     time,
+    epoch_distance,
+    epoch
 ):
     # Calculate moon period around planet.
     # Keep "1000.0"**3 as float: numba can't handle long ints
-
-    per_moon = (2 * pi * sqrt((a_moon * 1000.0) ** 3 / (G * M_planet))) / 60 / 60 / 24
+    # Check if correct. Add Moon mass to equation?
+    per_moon = (2 * pi * sqrt((a_moon * 1000.0) ** 3 / (G * (M_planet + M_moon)))) / 60 / 60 / 24
     mass_ratio = M_moon / M_planet
     t_start = np.min(time)
     t_end = np.max(time)
@@ -44,7 +44,7 @@ def pandora_epoch(
 
     # Get Kepler Ellipse
     xm, ym = ellipse_pos(
-        a_moon / R_star, per_moon, tau_moon, Omega_moon, w_moon, i_moon, time
+        a_moon / R_star, per_moon, tau_moon, Omega_moon, i_moon, time
     )
 
     # (x,y) grid in units of stellar radii; star at (0,0)
@@ -52,15 +52,20 @@ def pandora_epoch(
     start = -t_dur / tdur_p
     end = t_dur / tdur_p
     xpos_array = np.linspace(start, end, cadences)
-    # print(xpos_array)
 
     # user gives t0_planet_offset in units of days
     # have to convert to x scale == 0.5 transit duration for stellar radii
-    t0_shift_planet = -t0_planet_offset / (tdur_p / 2)
+    t0_shift_planet = - t0_planet_offset / (tdur_p / 2)
+
+    # Push planet following per_planet, which is a free parameter
+    # For reference: Distance between epoch segments is fixed as segment_distance
+    # Again, free parameter per_planet in units of days
+    # have to convert to x scale == 0.5 transit duration for stellar radii
+    per_shift_planet = - ((per_planet - epoch_distance) * epoch) / (tdur_p / 2)
 
     # Adjust position of planet and moon due to mass: barycentric wobble
     xm_bary, ym_bary, xp_bary, yp_bary = bary_pos(
-        xm, ym, xpos_array + t0_shift_planet, b_planet, mass_ratio
+        xm, ym, xpos_array + t0_shift_planet + per_shift_planet, b_planet, mass_ratio
     )
 
     # Distances of planet and moon from (0,0) = center of star
@@ -74,13 +79,12 @@ def pandora_epoch(
     return flux_planet, flux_moon, flux_total, xp_bary, yp_bary, xm_bary, ym_bary
 
 
-@jit(cache=True, nopython=True, fastmath=True)
+@jit(cache=False, nopython=True, fastmath=True, parallel=False)
 def pandora(
     r_moon,
     a_moon,
     tau_moon,
     Omega_moon,
-    w_moon,
     i_moon,
     M_moon,
     per_planet,
@@ -95,14 +99,18 @@ def pandora(
     epochs,
     epoch_duration,
     cadences_per_day,
+    epoch_distance
 ):
+    # epoch_distance is the fixed constant distance between subsequent data epochs
+    # Should be identical to the initial guess of the planetary period
+    # The planetary period `per_planet`, however, is a free parameter
+
 
     t0_planet_transit_times = np.arange(
         start=t0_planet,
-        stop=t0_planet + per_planet * epochs,
-        step=per_planet,
+        stop=t0_planet + epoch_distance * epochs,
+        step=epoch_distance,
     )
-    # print(t0_planet_transit_times)
 
     # tau_moon is the position of the moon on its orbit, given as [0..1]
     # for the first timestamp of the first epoch
@@ -112,10 +120,7 @@ def pandora(
     #          around. However, the sampler would not converge when testing models.
     # So, we use tau in [0..1] and propagate to following epochs manually
 
-    per_moon = (2 * pi * sqrt((a_moon * 1000.0) ** 3 / (G * M_planet))) / 60 / 60 / 24
-    # print("per_moon", per_moon)
-    # print("per_planet", per_planet)
-    # print("tau_moon first epoch", tau_moon)
+    per_moon = (2 * pi * sqrt((a_moon * 1000.0) ** 3 / (G * (M_planet + M_moon)))) / 60 / 60 / 24
 
     # Stroboscopic effect
     # Example: per_planet = 100d, per_moon = 20d ==> strobo_factor = 5
@@ -127,7 +132,6 @@ def pandora(
 
     # Each epoch must contain a segment of data, centered at the planetary transit
     # Each epoch must be the same time duration
-    # epoch_duration = 4  # days
     # cadences_per_day = 48  # switch this to automatic calculation? What about gaps?
 
     t_starts = (
@@ -150,22 +154,21 @@ def pandora(
     mx_bary_array = np.ones(shape=(epochs, cadences))
     my_bary_array = np.ones(shape=(epochs, cadences))
 
-    for epoch in range(epochs):
-        time_array = np.linspace(t_starts[epoch], t_ends[epoch], cadences)
+    for epoch in prange(epochs):
+        time_arrays[epoch] = np.linspace(t_starts[epoch], t_ends[epoch], cadences)
         (
-            flux_planet,
-            flux_moon,
-            flux_total,
-            px_bary,
-            py_bary,
-            mx_bary,
-            my_bary,
+            flux_planet_array[epoch],
+            flux_moon_array[epoch],
+            flux_total_array[epoch],
+            px_bary_array[epoch],
+            py_bary_array[epoch],
+            mx_bary_array[epoch],
+            my_bary_array[epoch]
         ) = pandora_epoch(
             r_moon,
             a_moon,
             tau_moon,
             Omega_moon,
-            w_moon,
             i_moon,
             M_moon,
             per_planet,
@@ -176,19 +179,10 @@ def pandora(
             M_planet,
             R_star,
             u,
-            time_array,
+            time_arrays[epoch],
+            epoch_distance,
+            epoch
         )
-        flux_planet_array[epoch, :] = flux_planet
-        flux_moon_array[epoch] = flux_moon
-        flux_total_array[epoch] = flux_total
-        px_bary_array[epoch] = px_bary
-        py_bary_array[epoch] = py_bary
-        mx_bary_array[epoch] = mx_bary
-        my_bary_array[epoch] = my_bary
-        time_arrays[epoch] = time_array
-
-
-    # print(flux_planet_array.ravel())
     return (
         flux_planet_array.ravel(),
         flux_moon_array.ravel(),
@@ -197,5 +191,5 @@ def pandora(
         py_bary_array.ravel(),
         mx_bary_array.ravel(),
         my_bary_array.ravel(),
-        time_arrays.ravel(),
+        time_arrays.ravel()
     )
