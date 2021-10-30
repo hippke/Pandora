@@ -15,7 +15,7 @@ u = np.array([[u1, u2]])
 # Here the fun begins. Choose these parameters:
 
 # Planet parameters
-r_planet = 63710  # radius [km] My prior: 1..100,000 km
+r_planet = 6371  # radius [km] My prior: 1..100,000 km
 a_planet = 149597870.700  # semimajor axis [km] My prior: 5e7..2e8 km
 b_planet = 0.4  # impact parameter [0..1.x] central transit is 0. My prior: 0..1
 per_planet = 365.25  # period [days] My prior: 360..370 days
@@ -23,7 +23,7 @@ M_planet = 5e27  # mass [kg] My prior: 5e24..5e27
 t0_planet_offset = 0.1  # true offset from assumed t0; constant for all periods [days]. My prior: -0.5..+0.5
 
 # Set moon parameters
-r_moon = 18000  # radius [km] My prior: 1..50,000 km
+r_moon = 1800  # radius [km] My prior: 1..50,000 km
 a_moon = 2e6  # semimajor axis [km] My prior: 10,000...3,000,000 km
 Omega_moon = 5  # degrees [0..90] My prior: 0..90 deg
 i_moon = 85  # degrees [0..90]. 90 is edge-on. My prior: 0..90 deg
@@ -46,7 +46,7 @@ noise_level = 3e-4  # Gaussian noise to be added to the generated data
 # Let's not add TOOOO much noise for now. We can test "fishing the noise" limits later
 
 # Call Pandora and get model with these parameters
-flux_planet_original, flux_moon_original, flux_total_original, px_bary, py_bary, mx_bary, my_bary, time_arrays_original = pandora(
+flux_planet_original1, flux_moon_original1, flux_total_original1, px_bary, py_bary, mx_bary, my_bary, time_arrays_original = pandora(
     r_moon,
     a_moon,
     tau_moon,
@@ -69,43 +69,40 @@ flux_planet_original, flux_moon_original, flux_total_original, px_bary, py_bary,
     supersampling_factor=1
 )
 
-t1 = ttime.time()
-# Call Pandora and get model with these parameters
-# Baseline 8 epochs 2.5d 48cad/day
-# multicore:  10   k  /sec
-# singlecore:  7.5 k /sec
-# 35% in mangold, 32% in bary_pos, 30% in ellipse_pos
-# Including ellipse_pos in main code: no gain
-# Bary: 2% if dropped
-# Running mean to downsample 5x supersampling 6%; effect of downsampling: 5x!!
 
 
-for i in range(7500):
-    flux_planet, flux_moon, flux_total, px_bary, py_bary, mx_bary, my_bary, time_arrays = pandora(
-        r_moon,
-        a_moon,
-        tau_moon,
-        Omega_moon,
-        i_moon,
-        M_moon,
-        per_planet,
-        a_planet,
-        r_planet,
-        b_planet,
-        t0_planet_offset,
-        M_planet,
-        R_star,
-        u,
-        t0_planet,
-        epochs,
-        epoch_duration,
-        cadences_per_day,
-        epoch_distance,
-        supersampling_factor=1
-    )
-t2 = ttime.time()
+flux_planet5, flux_moon5, flux_total5, px_bary, py_bary, mx_bary, my_bary, time_arrays = pandora(
+    r_moon,
+    a_moon,
+    tau_moon,
+    Omega_moon,
+    i_moon,
+    M_moon,
+    per_planet,
+    a_planet,
+    r_planet,
+    b_planet,
+    t0_planet_offset,
+    M_planet,
+    R_star,
+    u,
+    t0_planet,
+    epochs,
+    epoch_duration,
+    cadences_per_day,
+    epoch_distance,
+    supersampling_factor=5
+)
 
-print(np.sum(flux_total), np.sum(px_bary))
-print("Runtime", t2-t1)
-#assert (np.sum(flux_total) - 958.1037574581958) < 1e-8
-#assert (np.sum(px_bary) - (-339.3745230465677)) < 1e-8
+#print("time_arrays_original", time_arrays_original)
+#print("flux_total_original1", flux_total_original1)
+print("len(time_arrays_original)", len(time_arrays_original))
+print("len(time_arrays)", len(time_arrays))
+plt.plot(time_arrays_original, flux_total_original1, color="black")
+plt.plot(time_arrays, flux_total5, color="red")
+plt.show()
+
+diff = (flux_total_original1 - flux_total5) * 1e6
+plt.plot(time_arrays, diff, color="black")
+plt.show()
+

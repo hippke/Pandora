@@ -26,14 +26,14 @@ def ellpicb(n, k):
     for nit in range(1000):
         f = c
         c = d / p + c
-        g = kc / p
+        g = e / p
         d = 2 * (f * g + d)
         p = g + p
         g = m0
         m0 = kc + m0
         if abs(1 - kc / g) > 1e-8:
-            kc = 2 * sqrt(kc)
-            kc = kc * m0
+            kc = 2 * sqrt(e)
+            e = kc * m0
         else:
             return HALF_PI * (c * m0 + d) / (m0 * (m0 + p))
     return 0
