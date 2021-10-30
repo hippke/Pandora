@@ -10,6 +10,7 @@ from pandora import pandora
 from numba import jit
 from dynesty import DynamicNestedSampler, NestedSampler
 from dynesty import plotting as dyplot
+from multiprocessing import Pool, cpu_count
 
 
 #@jit(cache=True, nopython=True, fastmath=True)
@@ -92,7 +93,7 @@ epoch_distance = 365.25  # [days] Constant time distance between each epoch.
 
 time_arrays, testdata = np.loadtxt("output.csv", unpack=True)
 
-stdev = 1e-4
+stdev = 2e-4
 noise = np.random.normal(0, stdev, len(time_arrays))
 yerr = np.full(len(testdata), stdev)
 """
@@ -126,9 +127,33 @@ ndim = 12
 
 
 # Test
-#sampler = NestedSampler(log_likelihood, prior_transform, ndim=ndim, bound='single')
-#sampler = DynamicNestedSampler(log_likelihood, prior_transform, ndim=ndim, bound='multi')#, nlive=4000) 
 
+sampler = NestedSampler(
+    log_likelihood,
+    prior_transform,
+    ndim=ndim,
+    bound='multi',
+    #nlive=8000,
+    #queue_size=64,
+    #pool=Pool(8),
+    #use_pool={'prior_transform': False}
+    )
+"""
+with Pool(cpu_count()-1) as executor:
+    sampler = NestedSampler(
+        log_likelihood,
+            prior_transform,
+            ndim=ndim,
+            bound='single',
+            pool=executor,
+            queue_size=cpu_count(),
+            bootstrap=0)
+    sampler.run_nested()
+    
+    res = sampler.results
+"""
+#sampler = DynamicNestedSampler(log_likelihood, prior_transform, ndim=ndim, bound='multi')#, nlive=4000) 
+"""
 sampler = DynamicNestedSampler(
     log_likelihood,
     prior_transform, 
@@ -137,9 +162,12 @@ sampler = DynamicNestedSampler(
     sample='hslice', 
     #bound='none',
     slices=10)
+"""
 
 sampler.run_nested()
 res = sampler.results
+
+
 #print(res)
 #res.summary()
 #print(res.summary())

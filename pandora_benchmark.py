@@ -73,6 +73,9 @@ t1 = ttime.time()
 # Baseline 8 epochs 2.5d 48cad/day
 # multicore:  10   k  /sec
 # singlecore:  7.5 k /sec
+# 35% in mangold, 32% in bary_pos, 30% in ellipse_pos
+# Including ellipse_pos in main code: no gain
+# Bary: 2% if dropped
 
 
 for i in range(7500):
@@ -98,4 +101,8 @@ for i in range(7500):
         epoch_distance
     )
 t2 = ttime.time()
+
+print(np.sum(flux_total), np.sum(px_bary))
 print("Runtime", t2-t1)
+assert np.sum(flux_total) == 958.1037574581958
+assert np.sum(px_bary) == -339.3745230465677

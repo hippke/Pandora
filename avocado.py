@@ -6,9 +6,15 @@ def ellipse_pos(a, per, tau, Omega, i, time):
     """2D x-y Kepler solver WITHOUT eccentricity, WITHOUT mass"""
     
     # Scale tau to period
-    tau = tau * (per)
+    # tau_moon is the position of the moon on its orbit, given as [0..1]
+    # for the first timestamp of the first epoch
+    # Cannot be given in units of days in prior, because moon orbit period varies
+    # Example: Prior has tau in [5, 100] but model tests orbit with per_moon = 10
+    #          It would physically still be OK, because it is circular and wraps
+    #          around. However, the sampler would not converge when testing models.
+    # So, we use tau in [0..1] and propagate to following epochs manually
 
-    Q = 2 * arctan(tan((pi * (time - tau) / per)))
+    Q = 2 * arctan(tan((pi * (time - tau * per) / per)))
     V = sin(Q) * cos((i / 180 * pi))
     O = Omega / 180 * pi
     cos_Omega = cos(O)
@@ -64,9 +70,9 @@ def ellipse_pos_eccentricity(a, per, e, tau, Omega, w, i, time):
     #z = (sin(wf) * sin((i / 180 * pi))) * r
     return x, y
 
-
+"""
 val1, val2 = ellipse_pos_eccentricity(a=1, per=2, e=0.123, tau=0.534, Omega=54.2, w=12.12, i=55.4, time=4.5)
 assert val1 == 0.32562991217909504
 assert val2 == -0.5306948667069533
 print(val1, val2)
-
+"""
