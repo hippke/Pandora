@@ -12,8 +12,8 @@ Pandora employs an analytical photodynamical model, including:
 - Stellar limb darkening
 - Full and partial planet-moon eclipses
 - Barycentric motion of planet and moon
-- Nested sampling with [UltraNest](https://github.com/JohannesBuchner/UltraNest), [dynesty](https://github.com/joshspeagle/dynesty), and other samplers
-- Bayesian evidence calculation
+- Find moons with nested sampling using [UltraNest](https://github.com/JohannesBuchner/UltraNest), [dynesty](https://github.com/joshspeagle/dynesty), and other tools
+- Bayesian evidence calculation and model comparison
 
 ### Installation
 Try installing with `pip install pandora`. If that doesn't work, set up a fresh [miniconda](https://docs.conda.io/en/latest/miniconda.html) environment:
