@@ -19,7 +19,5 @@ Pandora employs an analytical photodynamical model, including:
 Try installing with `pip install pandora`. If that doesn't work, set up a fresh [miniconda](https://docs.conda.io/en/latest/miniconda.html) environment:
 ```
 conda create -n pandora python=3.10
-conda install cython
-pip install numba matplotlib numpy
-pip install pandora-moon ultranest
+pip install cython numba matplotlib numpy ultranest pandora-moon
 ```
