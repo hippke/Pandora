@@ -89,11 +89,18 @@ Example:
 Evaluate model and obtain lightcurve
 ------------------------------------
 
+.. class:: model.light_curve()
+
+Parameters: None
+
 Return parameters:
 
 .. _returnvalues:
 
-:flux_total: (*array*) text
+:time: (*array*) Timestamps of the model
+:flux_total: (*array*) Lightcurve of planet and moon model
+:flux_planet: (*array*) Only contributions by the planet
+:flux_moon: (*array*)  Only contributions by the moon
 
 Example:
 
@@ -101,4 +108,52 @@ Example:
 
    model = pandora.moon_model(params)
    time, flux_total, flux_planet, flux_moon = model.light_curve()
+
+
+Evaluate model and obtain positions
+-----------------------------------
+
+.. class:: model.coordinates()
+
+Parameters: None
+
+Return parameters:
+
+.. _returnvalues:
+
+:time: (*array*) Timestamps of the model
+:px_bary: (*array*) Planet X position at each timestamp
+:py_bary: (*array*)  Planet Y position at each timestamp
+:mx_bary: (*array*) Moon X position at each timestamp
+:my_bary: (*array*) Moon Y position at each timestamp
+
+Example:
+
+::
+
+   model = pandora.moon_model(params)
    time, px_bary, py_bary, mx_bary, my_bary = model.coordinates()
+
+
+Evaluate model and obtain transit video
+---------------------------------------
+
+.. class:: model.transit_video()
+
+
+Parameters:
+
+:filename: (*string*) Path and filename of video to be written to disk
+:codec: (*string*) Codec supported by matplotlib, such as `h264` or `gif`
+
+.. _returnvalues:
+
+(None)
+The video is saved to disk directly to the given path and filename.
+
+Example:
+
+::
+
+   model = pandora.moon_model(params)
+   video = model.transit_video()
