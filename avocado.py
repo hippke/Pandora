@@ -5,18 +5,6 @@ from numba import jit, prange
 
 
 
-
-@jit(cache=False, nopython=True, fastmath=True)
-def arctan_cordic(y, l1, l2, x=1.0):
-    r = 0.0
-    for idx in range(len(l1)):
-        if y < 0:
-            r, x, y = r - l2[idx], x - l1[idx]*y, y + l1[idx]*x
-        else:
-            r, x, y = r + l2[idx], x + l1[idx]*y, y - l1[idx]*x
-    return r
-
-
 @jit(cache=False, nopython=True, fastmath=True)
 def ellipse_pos(a, per, tau, Omega, i, time):
     """2D x-y Kepler solver WITHOUT eccentricity, WITHOUT mass"""
@@ -55,15 +43,6 @@ def ellipse_pos_iter(a, per, tau, Omega, i, time, transit_threshold_x, xp):
     # So, we use tau in [0..1] and propagate to following epochs manually
     tau_per = tau * per
 
-    """
-    cordic_table_size = 60
-    l1 = np.empty(cordic_table_size)
-    l2 = l1.copy()
-    for idx in range(cordic_table_size):
-        exp = np.exp2(-idx)
-        l1[idx] = exp
-        l2[idx] = np.arctan(exp)
-    """
     O = Omega / 180 * pi
     cos_Omega = cos(O)
     sin_Omega = sin(O)
@@ -72,10 +51,9 @@ def ellipse_pos_iter(a, per, tau, Omega, i, time, transit_threshold_x, xp):
     y = x.copy()
     for idx in prange(len(time)):
         if abs(xp[idx]) > transit_threshold_x:
-            x[idx] = np.inf
+            x[idx] = np.inf  # can not be transiting
         else:
             Q = 2 * arctan(tan((pi * (time[idx] - tau_per) / per)))
-            #Q = 2 * arctan_cordic(y=val, l1=l1, l2=l2)  # slower
             x[idx] = (cos_Omega * cos(Q) - sin_Omega * sin(Q) * k) * a
             y[idx] = (sin_Omega * cos(Q) + cos_Omega * sin(Q) * k) * a
     return x, y

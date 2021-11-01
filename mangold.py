@@ -9,10 +9,41 @@
 # - Overall speed improvements: ~10%
 
 from numba import jit, prange
-from numpy import pi, sqrt, arccos, abs, log, zeros, ravel
+from numpy import pi, sqrt, arccos, abs, log, zeros, ravel, ones
 
 HALF_PI = 0.5 * pi
 INV_PI = 1 / pi
+
+
+@jit(cache=False, nopython=True, fastmath=True)
+def circle_circle_intersection_area(r1, r2, b):
+    """Area of the intersection of two circles."""
+    if r1 < b - r2:
+        return 0
+    elif r1 >= b + r2:
+        return pi * r2 ** 2
+    elif b - r2 <= -r1:
+        return pi * r1 ** 2
+    else:
+        return (r2 ** 2 * arccos((b ** 2 + r2 ** 2 - r1 ** 2) / (2 * b * r2)) +
+                r1 ** 2 * arccos((b ** 2 + r1 ** 2 - r2 ** 2) / (2 * b * r1)) -
+                0.5 * sqrt((-b + r2 + r1) * (b + r2 - r1) * (b - r2 + r1) * (b + r2 + r1)))
+
+
+@jit(cache=False, nopython=True, fastmath=True)
+def occult_small(zs, k, u1, u2):
+    i = zs.size
+    f = ones(i)
+    m = f.copy()
+    b = abs(zs)
+    s = 2 * pi * 1 / 12 * (-2 * u1 - u2 + 6)
+    for j in range(i):
+        m[j] = sqrt(1 - min(b[j]**2, 1))
+        if b[j] < 1 + k:
+            l = (1 - u1 * (1 - m[j]) - u2 * (1 - m[j]) ** 2)
+            a = circle_circle_intersection_area(1, k, b[j])
+            f[j] = (s - l * a) / s
+    return f
 
 
 @jit(cache=False, nopython=True, fastmath=True)
@@ -86,7 +117,7 @@ def ellk(k):
 
 
 @jit(cache=False, nopython=True, fastmath=True, parallel=False)
-def occult_array(zs, u1, u2, k):
+def occult(zs, k, u1, u2):
     """Evaluates the transit model for an array of normalized distances.
     Parameters
     ----------

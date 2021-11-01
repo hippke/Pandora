@@ -3,34 +3,209 @@ from numpy import sqrt, pi, arcsin
 import numpy as np
 
 from avocado import ellipse_pos, ellipse_pos_iter
-from mangold import occult_array
+from mangold import occult, occult_small
 from helpers import resample
 # from pumpkin import eclipse_ratio
 
 
+class model_params(object):
+    def __init__(self):
+
+        # Star parameters
+        self.R_star = None
+        self.u1 = None
+        self.u2 = None
+
+        # Planet parameters
+        self.per_planet = None
+        self.a_planet = None
+        self.r_planet = None
+        self.b_planet = None
+        self.t0_planet = None
+        self.t0_planet_offset = None        
+        self.M_planet = None
+
+        # Moon parameters
+        self.r_moon = None
+        self.a_moon = None
+        self.tau_moon = None
+        self.Omega_moon = None
+        self.i_moon = None
+        self.M_moon = None
+
+        # Other model parameters
+        self.epochs = None
+        self.epoch_duration = None
+        self.cadences_per_day = None
+        self.epoch_distance = None
+        self.supersampling_factor = None
+        self.occult_small_threshold = None
+
+
+class moon_model(object):
+    def __init__(self, params):
+
+        
+        # Star parameters
+        self.R_star = params.R_star
+        self.u1 = params.u1
+        self.u2 = params.u2
+
+        # Planet parameters
+        self.per_planet = params.per_planet
+        self.a_planet = params.a_planet
+        self.r_planet = params.r_planet
+        self.b_planet = params.b_planet
+        self.t0_planet = params.t0_planet
+        self.t0_planet_offset = params.t0_planet_offset        
+        self.M_planet = params.M_planet
+
+        # Moon parameters
+        self.r_moon = params.r_moon
+        self.a_moon = params.a_moon
+        self.tau_moon = params.tau_moon
+        self.Omega_moon = params.Omega_moon
+        self.i_moon = params.i_moon
+        self.M_moon = params.M_moon
+
+        # Other model parameters
+        self.epochs = params.epochs
+        self.epoch_duration = params.epoch_duration
+        self.cadences_per_day = params.cadences_per_day
+        self.epoch_distance = params.epoch_distance
+        self.supersampling_factor = params.supersampling_factor
+        self.occult_small_threshold = params.occult_small_threshold
+
+    def evaluate(self):
+        self.flux_planet, self.flux_moon, self.flux_total, self.px_bary, self.py_bary, self.x_bary, self.my_bary, self.time_arrays = pandora(        
+            self.R_star,
+            self.u1,
+            self.u2,
+
+            # Planet parameters
+            self.per_planet,
+            self.a_planet,
+            self.r_planet,
+            self.b_planet,
+            self.t0_planet,
+            self.t0_planet_offset,   
+            self.M_planet,
+
+            # Moon parameters
+            self.r_moon,
+            self.a_moon,
+            self.tau_moon,
+            self.Omega_moon,
+            self.i_moon,
+            self.M_moon,
+
+            # Other model parameters
+            self.epochs,
+            self.epoch_duration,
+            self.cadences_per_day,
+            self.epoch_distance,
+            self.supersampling_factor,
+            self.occult_small_threshold
+        )
+        return time_arrays, flux_total, flux_planet, flux_moon
+
+    def light_curve(self):
+        flux_planet, flux_moon, flux_total, px_bary, py_bary, mx_bary, my_bary, time_arrays = pandora(        
+            self.R_star,
+            self.u1,
+            self.u2,
+
+            # Planet parameters
+            self.per_planet,
+            self.a_planet,
+            self.r_planet,
+            self.b_planet,
+            self.t0_planet,
+            self.t0_planet_offset,   
+            self.M_planet,
+
+            # Moon parameters
+            self.r_moon,
+            self.a_moon,
+            self.tau_moon,
+            self.Omega_moon,
+            self.i_moon,
+            self.M_moon,
+
+            # Other model parameters
+            self.epochs,
+            self.epoch_duration,
+            self.cadences_per_day,
+            self.epoch_distance,
+            self.supersampling_factor,
+            self.occult_small_threshold
+        )
+        return time_arrays, flux_total, flux_planet, flux_moon
+
+    def coordinates(self):
+        flux_planet, flux_moon, flux_total, px_bary, py_bary, mx_bary, my_bary, time_arrays = pandora(        
+            self.R_star,
+            self.u1,
+            self.u2,
+
+            # Planet parameters
+            self.per_planet,
+            self.a_planet,
+            self.r_planet,
+            self.b_planet,
+            self.t0_planet,
+            self.t0_planet_offset,   
+            self.M_planet,
+
+            # Moon parameters
+            self.r_moon,
+            self.a_moon,
+            self.tau_moon,
+            self.Omega_moon,
+            self.i_moon,
+            self.M_moon,
+
+            # Other model parameters
+            self.epochs,
+            self.epoch_duration,
+            self.cadences_per_day,
+            self.epoch_distance,
+            self.supersampling_factor,
+            self.occult_small_threshold
+        )
+        return time_arrays, px_bary, py_bary, mx_bary, my_bary
+
+
 @jit(cache=False, nopython=True, fastmath=True, parallel=False)
 def pandora(
+    R_star,
+    u1,
+    u2,
+
+    # Planet parameters
+    per_planet,
+    a_planet,
+    r_planet,
+    b_planet,
+    t0_planet,
+    t0_planet_offset,   
+    M_planet,
+
+    # Moon parameters
     r_moon,
     a_moon,
     tau_moon,
     Omega_moon,
     i_moon,
     M_moon,
-    per_planet,
-    a_planet,
-    r_planet,
-    b_planet,
-    t0_planet_offset,
-    M_planet,
-    R_star,
-    u1,
-    u2,
-    t0_planet,
+
+    # Other model parameters
     epochs,
     epoch_duration,
     cadences_per_day,
     epoch_distance,
-    supersampling_factor=1,
+    supersampling_factor,
+    occult_small_threshold,
 ):
     # "Morphological light-curve distortions due to finite integration time"
     # https://ui.adsabs.harvard.edu/abs/2010MNRAS.408.1758K/abstract
@@ -56,7 +231,6 @@ def pandora(
     # Here, however, we need T2-T3 (points where center of planet is on stellar limb)
     # https://www.paulanthonywilson.com/exoplanets/exoplanet-detection-techniques/the-exoplanet-transit-method/
     tdur_p = per_planet / pi * arcsin(sqrt(R_star ** 2) / a_planet)
-    print(tdur_p)
 
     # Calculate moon period around planet.
     # Keep "1000.0"**3 as float: numba can't handle long ints
@@ -140,9 +314,14 @@ def pandora(
     z_planet = sqrt(xp_bary ** 2 + yp_bary ** 2)
     z_moon = sqrt(xm_bary ** 2 + ym_bary ** 2)
 
-    # Mangold occultations
-    flux_planet = occult_array(zs=z_planet, u1=u1, u2=u2, k=r_planet / R_star)
-    flux_moon = occult_array(zs=z_moon, u1=u1, u2=u2, k=r_moon / R_star)
+    # Always use precise Mandel-Agol occultationmodel for planet 
+    flux_planet = occult(zs=z_planet, u1=u1, u2=u2, k=r_planet / R_star)
+
+    # For moon transit: User can "set occult_small_threshold > 0"
+    if (r_moon / R_star) < occult_small_threshold:
+        flux_moon = occult_small(zs=z_moon, k=r_moon / R_star, u1=u1, u2=u2)
+    else:
+        flux_moon = occult(zs=z_moon, k=r_moon / R_star, u1=u1, u2=u2)
 
     # Here: Pumpkin: Mutual planet-moon occultations
 
