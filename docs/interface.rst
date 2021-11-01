@@ -20,8 +20,8 @@ Planet parameters:
 :per_planet: *(float)* Period [days]. Should be a free parameter.
 :a_planet: *(float)* Semimajor axis [km]. Should be a free parameter.
 :r_planet: *(float)* Radius [km]. Should be a free parameter.
-:b_planet: *(0..1.x)* Impact parameter [km]. Should be a free parameter.
-:t0_planet: *(float)* Time of inferior conjunction [days]. Should not be a free parameter.
+:b_planet: *(float)* Impact parameter [0..1.x]. Should be a free parameter.
+:t0_planet: *(float)* Time of inferior conjunction [days]. Should NOT be a free parameter.
 :t0_planet_offset: *(float)* Time difference to inferior conjunction [days]. Should be a free parameter.
 :M_planet: *(float)* Mass [kg]. Should be a free parameter.
 
@@ -36,11 +36,11 @@ Moon parameters:
 
 Other model parameters:
 
-:epochs:
-:epoch_duration:
-:cadences_per_day:
-:epoch_distance:
-:supersampling_factor:
+:epochs: (*int*) Number of transit epochs in time series.
+:epoch_duration: (*float*) Duration of each epoch, centered at planetary transit [days]
+:cadences_per_day: (*int*) Number of exposured (cadences) per day. Should be constant.
+:epoch_distance: (*float*) Time distance between each epoch [days]. Should NOT be a free parameter.
+:supersampling_factor: (*int*) Default 1 = no supersampling. Higher values compensate for morphological deformation at the cost of computational expense.
 
 .. note::
 
