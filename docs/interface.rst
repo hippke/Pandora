@@ -54,7 +54,7 @@ Other model parameters:
 Example:
 
 ::
-
+    import pandora
     params = pandora.model_params()
     params.R_star = 696342
     params.u1 = 0.4
