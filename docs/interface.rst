@@ -89,4 +89,4 @@ Example:
     time, flux_total, flux_planet, flux_moon = model.light_curve()
     time, px_bary, py_bary, mx_bary, my_bary = model.coordinates()
  
- ::
+
