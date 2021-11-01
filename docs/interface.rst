@@ -46,7 +46,7 @@ Other model parameters:
 :cadences_per_day: (*int*) Number of exposured (cadences) per day. Should be constant.
 :epoch_distance: (*float*) Time distance between each epoch [days]. Should NOT be a free parameter.
 :supersampling_factor: (*int*) Default 1 = no supersampling. Higher values compensate for morphological deformation at the cost of computational expense.
-:occult_small_threshold: (*float*) If the moon radius (R_S/R_star) is smaller than this value, its occultation is approximated with constant limb darkening under its area
+:occult_small_threshold: (*float*) If the moon radius (R_S/R_star) is smaller than this value, its occultation is approximated with constant limb darkening under its area. To obtain a precise estimate even for very small moons, set `occult_small_threshold` to a very small value (e.g., 1e-8)
 
 .. note::
 
