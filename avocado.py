@@ -29,10 +29,13 @@ def ellipse_pos(a, per, tau, Omega, i, time):
     return x, y
 
 
+# "ellipse_pos_iter" is ~10% slower than array version "ellipse_pos"
+# But: If >10% are out of transit (which is almost always the case), 
+#      then linear speed increase (typically 2x)
 @jit(cache=False, nopython=True, fastmath=True, parallel=False)
 def ellipse_pos_iter(a, per, tau, Omega, i, time, transit_threshold_x, xp):
     """2D x-y Kepler solver WITHOUT eccentricity, WITHOUT mass"""
-    
+
     # Scale tau to period
     # tau_moon is the position of the moon on its orbit, given as [0..1]
     # for the first timestamp of the first epoch
@@ -42,21 +45,29 @@ def ellipse_pos_iter(a, per, tau, Omega, i, time, transit_threshold_x, xp):
     #          around. However, the sampler would not converge when testing models.
     # So, we use tau in [0..1] and propagate to following epochs manually
     tau_per = tau * per
-
     O = Omega / 180 * pi
-    cos_Omega = cos(O)
-    sin_Omega = sin(O)
-    k = cos(i / 180 * pi)
+    i = i / 180 * pi
     x = np.zeros(len(time))
     y = x.copy()
     for idx in prange(len(time)):
-        if abs(xp[idx]) > transit_threshold_x:
-            x[idx] = np.inf  # can not be transiting
+        if abs(xp[idx]) > transit_threshold_x:  # can not be transiting
+            x[idx] = np.inf
         else:
-            Q = 2 * arctan(tan((pi * (time[idx] - tau_per) / per)))
-            x[idx] = (cos_Omega * cos(Q) - sin_Omega * sin(Q) * k) * a
-            y[idx] = (sin_Omega * cos(Q) + cos_Omega * sin(Q) * k) * a
+            # all of these cos(float) are zero cost at runtime (pre-calc at compile)
+            # expensive: arctan(tan(...)), sin(Q), cos(Q) in each iteration
+            # re-writing with extra variables gains nothing
+            k = tan((pi * (time[idx] - tau_per) / per))
+
+            # faster to substitute out the arctan, tan and sin this way:
+            # \cos(2 \arctan(\tan(k))) = \frac{1 - \tan^2(k)}{1 + \tan^2(k)}
+            # \sin(2 \arctan(\tan(k))) = \frac{2 \tan(k)}{1 + \tan^2(k)}
+            cos_Q = (1 - k ** 2) / (1 + k ** 2)
+            sin_Q = (2 * k) / ((1 + k ** 2))
+
+            x[idx] = (cos(O) * cos_Q - sin(O) * sin_Q * cos(i)) * a
+            y[idx] = (sin(O) * cos_Q + cos(O) * sin_Q * cos(i)) * a
     return x, y
+
 
 
 #@jit(cache=False, nopython=True, fastmath=True)

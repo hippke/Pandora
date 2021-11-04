@@ -12,9 +12,9 @@ class model_params(object):
     def __init__(self):
 
         # Star parameters
-        self.R_star = None
         self.u1 = None
         self.u2 = None
+        self.R_star = None
 
         # Planet parameters
         self.per_planet = None
@@ -27,7 +27,7 @@ class model_params(object):
 
         # Moon parameters
         self.r_moon = None
-        self.a_moon = None
+        self.per_moon = None
         self.tau_moon = None
         self.Omega_moon = None
         self.i_moon = None
@@ -47,9 +47,9 @@ class moon_model(object):
 
         
         # Star parameters
-        self.R_star = params.R_star
         self.u1 = params.u1
         self.u2 = params.u2
+        self.R_star = params.R_star
 
         # Planet parameters
         self.per_planet = params.per_planet
@@ -62,7 +62,7 @@ class moon_model(object):
 
         # Moon parameters
         self.r_moon = params.r_moon
-        self.a_moon = params.a_moon
+        self.per_moon = params.a_moon
         self.tau_moon = params.tau_moon
         self.Omega_moon = params.Omega_moon
         self.i_moon = params.i_moon
@@ -78,9 +78,9 @@ class moon_model(object):
 
     def evaluate(self):
         self.flux_planet, self.flux_moon, self.flux_total, self.px_bary, self.py_bary, self.x_bary, self.my_bary, self.time_arrays = pandora(        
-            self.R_star,
             self.u1,
             self.u2,
+            R_star,
 
             # Planet parameters
             self.per_planet,
@@ -93,7 +93,7 @@ class moon_model(object):
 
             # Moon parameters
             self.r_moon,
-            self.a_moon,
+            self.per_moon,
             self.tau_moon,
             self.Omega_moon,
             self.i_moon,
@@ -111,9 +111,9 @@ class moon_model(object):
 
     def light_curve(self):
         flux_planet, flux_moon, flux_total, px_bary, py_bary, mx_bary, my_bary, time_arrays = pandora(        
-            self.R_star,
             self.u1,
             self.u2,
+            R_star,
 
             # Planet parameters
             self.per_planet,
@@ -126,7 +126,7 @@ class moon_model(object):
 
             # Moon parameters
             self.r_moon,
-            self.a_moon,
+            self.per_moon,
             self.tau_moon,
             self.Omega_moon,
             self.i_moon,
@@ -144,9 +144,9 @@ class moon_model(object):
 
     def coordinates(self):
         flux_planet, flux_moon, flux_total, px_bary, py_bary, mx_bary, my_bary, time_arrays = pandora(        
-            self.R_star,
             self.u1,
             self.u2,
+            R_star,
 
             # Planet parameters
             self.per_planet,
@@ -159,7 +159,7 @@ class moon_model(object):
 
             # Moon parameters
             self.r_moon,
-            self.a_moon,
+            self.per_moon,
             self.tau_moon,
             self.Omega_moon,
             self.i_moon,
@@ -178,9 +178,9 @@ class moon_model(object):
 
 @jit(cache=False, nopython=True, fastmath=True, parallel=False)
 def pandora(
-    R_star,
     u1,
     u2,
+    R_star,
 
     # Planet parameters
     per_planet,
@@ -193,7 +193,7 @@ def pandora(
 
     # Moon parameters
     r_moon,
-    a_moon,
+    per_moon,
     tau_moon,
     Omega_moon,
     i_moon,
@@ -214,7 +214,6 @@ def pandora(
     # Then, 5x denser in time sampling, and averaging after, approximates effect
     if supersampling_factor < 1:
         print("supersampling_factor must be positive integer")
-        # return False
     supersampled_cadences_per_day = cadences_per_day * int(supersampling_factor)
 
     # epoch_distance is the fixed constant distance between subsequent data epochs
@@ -228,19 +227,14 @@ def pandora(
 
     # Planetary transit duration at b=0 equals the width of the star
     # Formally correct would be: (R_star+r_planet) for the transit duration T1-T4
-    # Here, however, we need T2-T3 (points where center of planet is on stellar limb)
+    # Here, however, we need points where center of planet is on stellar limb
     # https://www.paulanthonywilson.com/exoplanets/exoplanet-detection-techniques/the-exoplanet-transit-method/
-    tdur_p = per_planet / pi * arcsin(sqrt(R_star ** 2) / a_planet)
+    tdur_p = per_planet / pi * arcsin(1 / a_planet)
 
-    # Calculate moon period around planet.
-    # Keep "1000.0"**3 as float: numba can't handle long ints
+    # Calculate moon period around planet
     G = 6.67408e-11
-    per_moon = (
-        (2 * pi * sqrt((a_moon * 1000.0) ** 3 / (G * (M_planet + M_moon))))
-        / 60
-        / 60
-        / 24
-    )
+    day = 60 * 60 * 24
+    a_moon = (G * (M_planet + M_moon) / (2 * pi / (per_moon * day)) ** 2 ) ** (1/3)
 
     # t0_planet_offset in [days] ==> convert to x scale (i.e. 0.5 transit dur radius)
     t0_shift_planet = t0_planet_offset / (tdur_p / 2)
@@ -272,22 +266,10 @@ def pandora(
     # Select segment in xp array close enough to star so that ellipse CAN transit
     # 3x r_planet: 2*r_planet because bary wobble up to one planet diameter
     # Should this rather be: (tdur_p/2) ?
-    transit_threshold_x = a_moon / R_star + (3 * r_planet / R_star) + tdur_p
+    # If the threhold is too generous, it only costs compute.
+    # If the threshold is too tight, it will make the result totally wrong
+    transit_threshold_x = a_moon / R_star + (3 * r_planet) + tdur_p
 
-    """
-    xm, ym = ellipse_pos(
-            a=a_moon / R_star,
-            per=per_moon,
-            tau=tau_moon,
-            Omega=Omega_moon,
-            i=i_moon,
-            time=time,
-        )
-    """
-
-    # "ellipse_pos_iter" is ~10% slower than array version "ellipse_pos"
-    # But: If >10% are out of transit (which is almost always the case), 
-    #      then linear speed increase (typically 2x)
     xm, ym = ellipse_pos_iter(
             a=a_moon / R_star,
             per=per_moon,
@@ -298,8 +280,7 @@ def pandora(
             transit_threshold_x=transit_threshold_x,
             xp=xp
         )
-    
-    
+
     # Add barycentric correction to planet and moon as function of mass ratio
     # Negligible runtime (<1%): No benefit from skipping for out of transit parts
     mass_ratio = M_moon / M_planet
@@ -314,17 +295,16 @@ def pandora(
     z_planet = sqrt(xp_bary ** 2 + yp_bary ** 2)
     z_moon = sqrt(xm_bary ** 2 + ym_bary ** 2)
 
-    # Always use precise Mandel-Agol occultationmodel for planet 
-    flux_planet = occult(zs=z_planet, u1=u1, u2=u2, k=r_planet / R_star)
+    # Always use precise Mandel-Agol occultation model for planet 
+    flux_planet = occult(zs=z_planet, u1=u1, u2=u2, k=r_planet)
 
     # For moon transit: User can "set occult_small_threshold > 0"
-    if (r_moon / R_star) < occult_small_threshold:
-        flux_moon = occult_small(zs=z_moon, k=r_moon / R_star, u1=u1, u2=u2)
+    if r_moon < occult_small_threshold:
+        flux_moon = occult_small(zs=z_moon, k=r_moon, u1=u1, u2=u2)
     else:
-        flux_moon = occult(zs=z_moon, k=r_moon / R_star, u1=u1, u2=u2)
+        flux_moon = occult(zs=z_moon, k=r_moon, u1=u1, u2=u2)
 
     # Here: Pumpkin: Mutual planet-moon occultations
-
 
     flux_total = 1 - ((1 - flux_planet) + (1 - flux_moon))
 
