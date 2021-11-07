@@ -58,7 +58,7 @@ Example:
 
    import pandora
    params = pandora.model_params()
-   R_sun = 696342000  # [m]
+   R_sun = 696_342_000  # [m]
    params.R_star = 0.9 * R_sun
    params.u1 = 0.4
    params.u2 = 0.6
