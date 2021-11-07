@@ -145,7 +145,8 @@ Evaluate model and obtain transit video
 
 Parameters:
 
-:darkmode: (*boolean*) If `False` (default), a standard Matplotlib Figure with axes is created. If `True`: No axes and black background (movie mode)
+:dark_mode: (*boolean*) If `False` (default), a standard Matplotlib Figure with axes is created. If `True`: No axes and black background (movie mode)
+:limb_darkening: (*boolean*) If `True` (default), a limb-darkened star is painted using the model parameters u1, u2. If `False`, a uniformely yellow star is painted.
 :planet_color: (*string*) A matplotlib color for the planet. Default: "black".
 :moon_color: (*string*) A matplotlib color for the moon. Default: "black".
 
