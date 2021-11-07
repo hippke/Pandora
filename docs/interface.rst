@@ -58,31 +58,32 @@ Example:
 
    import pandora
    params = pandora.model_params()
-   params.R_star = 696342
+   R_sun = 696342000  # [m]
+   params.R_star = 0.9 * R_sun
    params.u1 = 0.4
    params.u2 = 0.6
 
    # Planet parameters
    params.per_planet = 365.25
-   params.a_planet = 217 * 696342
-   params.r_planet = 63710
-   params.b_planet = 0.0
+   params.a_planet = 217
+   params.r_planet = 0.1
+   params.b_planet = 0.3
    params.t0_planet = 100
-   params.t0_planet_offset = 0.0
+   params.t0_planet_offset = 0.1
    params.M_planet = 5e27
 
    # Moon parameters
-   params.r_moon = 18000
-   params.a_moon = 2e6
+   params.r_moon = 0.01
+   params.per_moon = 28
    params.tau_moon = 0.25
    params.Omega_moon = 5
    params.i_moon = 85
    params.M_moon = 5e21
 
    # Other model parameters
-   params.epochs = 1
+   params.epochs = 3
    params.epoch_duration = 2.5
-   params.cadences_per_day = 4800
+   params.cadences_per_day = 48
    params.epoch_distance = 365.25
    params.supersampling_factor = 1
 
