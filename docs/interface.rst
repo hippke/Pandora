@@ -146,6 +146,9 @@ Evaluate model and obtain transit video
 Parameters:
 
 :darkmode: (*boolean*) If `False` (default), a standard Matplotlib Figure with axes is created. If `True`: No axes and black background (movie mode)
+:planet_color: (*string*) A matplotlib color for the planet. Default: "black".
+:moon_color: (*string*) A matplotlib color for the moon. Default: "black".
+
 
 .. _returnvalues:
 
@@ -163,3 +166,9 @@ Example:
 .. note::
 
    Creation takes considerable time. Performance is ~30 video frames per second. A progress bar is shown during video creation.
+   
+   
+.. note::
+
+   Sizes of planet and moon may not be pixel-perfect due to scaling done by Matplotlib.
+   
