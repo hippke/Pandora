@@ -123,6 +123,8 @@ Return parameters:
 
 .. _returnvalues:
 
+Returns:
+
 :time: (*array*) Timestamps of the model
 :px_bary: (*array*) Planet X position at each timestamp
 :py_bary: (*array*)  Planet Y position at each timestamp
@@ -149,7 +151,7 @@ Parameters:
 
 .. _returnvalues:
 
-Matplotlib FuncAnimation object which can be viewed or saved to disk.
+Returns: Matplotlib FuncAnimation object which can be viewed or saved to disk.
 
 Example:
 
