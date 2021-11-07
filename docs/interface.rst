@@ -139,22 +139,26 @@ Example:
 Evaluate model and obtain transit video
 ---------------------------------------
 
-.. class:: model.transit_video()
+.. class:: model.video()
 
 
 Parameters:
 
-:filename: (*string*) Path and filename of video to be written to disk
-:codec: (*string*) Codec supported by matplotlib, such as `h264` or `gif`
+:darkmode: (*boolean*) If `False` (default), a standard Matplotlib Figure with axes is created. If `True`: No axes and black background (movie mode)
 
 .. _returnvalues:
 
-(None)
-The video is saved to disk directly to the given path and filename.
+Matplotlib FuncAnimation object which can be viewed or saved to disk.
 
 Example:
 
 ::
 
    model = pandora.moon_model(params)
-   video = model.transit_video()
+   video = model.video(darkmode=True)
+   video.save(filename="video.mp4", fps=24, dpi=200)
+
+
+.. note::
+
+   Performance is ~1,000 video frames per minute.
