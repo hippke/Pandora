@@ -156,6 +156,7 @@ Example:
 
    model = pandora.moon_model(params)
    video = model.video(darkmode=True)
+   # video.show()
    video.save(filename="video.mp4", fps=24, dpi=200)
 
 
