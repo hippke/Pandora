@@ -16,28 +16,28 @@ Define data for a model
 
 Star parameters:
 
-:R_star: *(float)* Stellar radius [km]
-:u1: *(float)* Quadratic limb-darkening [0..1]
-:u2: *(float)* Quadratic limb-darkening [0..1]
+:R_star: *(float)* Stellar radius [m]
+:u1: *(float)* Quadratic limb-darkening [0..1]. Can be a free parameter.
+:u2: *(float)* Quadratic limb-darkening [0..1]. Can be a free parameter.
 
 Planet parameters:
 
 :per_planet: *(float)* Period [days]. Should be a free parameter.
-:a_planet: *(float)* Semimajor axis [km]. Should be a free parameter.
-:r_planet: *(float)* Radius [km]. Should be a free parameter.
-:b_planet: *(float)* Impact parameter [0..1.x]. Should be a free parameter.
+:a_planet: *(float)* Semimajor axis [R_star]. Should be a free parameter.
+:r_planet: *(float)* Radius [R_star]. Should be a free parameter.
+:b_planet: *(float)* Impact parameter [0..2]. Should be a free parameter.
 :t0_planet: *(float)* Time of inferior conjunction [days]. Should NOT be a free parameter.
 :t0_planet_offset: *(float)* Time difference to inferior conjunction [days]. Should be a free parameter.
 :M_planet: *(float)* Mass [kg]. Should be a free parameter.
 
 Moon parameters:
 
-:r_moon: *(float)*  Radius [km]. Should be a free parameter.
-:a_moon: *(float)*  Semimajor axis [km]. Should be a free parameter.
+:r_moon: *(float)*  Radius [R_star]. Should be a free parameter.
+:per_moon: *(float)*  Semimajor axis [days]. Should be a free parameter.
 :tau_moon: *(float)*  Time of periapsis passage [0..1] normalized by period. Should be a free parameter.
 :Omega_moon: *(float)* Longitude of the ascending node [0..360 deg]. Should be a free parameter.
 :i_moon: *(float)* Orbit inclination [0..360 deg]. Should be a free parameter.
-:M_moon: *(float)* Mass [kg]. Should be a free parameter.
+:mass_ratio: *(float)* [0..1]. Mass ratio M_moon / M_planet. Should be a free parameter.
 
 Other model parameters:
 
