@@ -124,10 +124,10 @@ Parameters: None
 Returns:
 
 :time: (*array*) Timestamps of the model
-:px_bary: (*array*) Planet X position at each timestamp
-:py_bary: (*array*)  Planet Y position at each timestamp
-:mx_bary: (*array*) Moon X position at each timestamp
-:my_bary: (*array*) Moon Y position at each timestamp
+:px: (*array*) Planet X position at each timestamp
+:py: (*array*)  Planet Y position at each timestamp
+:mx: (*array*) Moon X position at each timestamp
+:my: (*array*) Moon Y position at each timestamp
 
 Example:
 
