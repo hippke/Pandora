@@ -161,4 +161,4 @@ Example:
 
 .. note::
 
-   Performance is ~1,000 video frames per minute.
+   Creation takes considerable time. Performance is ~1,000 video frames per minute.
