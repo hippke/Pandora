@@ -162,4 +162,4 @@ Example:
 
 .. note::
 
-   Creation takes considerable time. Performance is ~24 video frames per second. No progress bar is shown during video creation.
+   Creation takes considerable time. Performance is ~30 video frames per second. A progress bar is shown during video creation.
