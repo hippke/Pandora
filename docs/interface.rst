@@ -95,7 +95,7 @@ Evaluate model and obtain lightcurve
 
 Parameters: None
 
-Return parameters:
+Returns:
 
 .. _returnvalues:
 
@@ -118,8 +118,6 @@ Evaluate model and obtain positions
 .. class:: model.coordinates()
 
 Parameters: None
-
-Return parameters:
 
 .. _returnvalues:
 
