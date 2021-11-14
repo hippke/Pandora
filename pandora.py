@@ -43,6 +43,7 @@ class model_params(object):
         self.epoch_distance = None
         self.supersampling_factor = None
         self.occult_small_threshold = None
+        self.hill_sphere_threshold = None
 
 
 class moon_model(object):
@@ -78,6 +79,7 @@ class moon_model(object):
         self.epoch_distance = params.epoch_distance
         self.supersampling_factor = params.supersampling_factor
         self.occult_small_threshold = params.occult_small_threshold
+        self.hill_sphere_threshold = params.hill_sphere_threshold
 
     def video(self, limb_darkening=True, teff=6000, planet_color="black", moon_color="black"):
         self.flux_planet, self.flux_moon, self.flux_total, self.px_bary, self.py_bary, self.mx_bary, self.my_bary, self.time_arrays = pandora(        
@@ -108,7 +110,8 @@ class moon_model(object):
             self.cadences_per_day,
             self.epoch_distance,
             self.supersampling_factor,
-            self.occult_small_threshold
+            self.occult_small_threshold,
+            self.hill_sphere_threshold
         )
         # Build video with matplotlib
         fig = plt.figure(figsize = (5,5))
@@ -203,7 +206,8 @@ class moon_model(object):
             self.cadences_per_day,
             self.epoch_distance,
             self.supersampling_factor,
-            self.occult_small_threshold
+            self.occult_small_threshold,
+            self.hill_sphere_threshold
         )
         return time_arrays, flux_total, flux_planet, flux_moon
 
@@ -236,7 +240,8 @@ class moon_model(object):
             self.cadences_per_day,
             self.epoch_distance,
             self.supersampling_factor,
-            self.occult_small_threshold
+            self.occult_small_threshold,
+            self.hill_sphere_threshold
         )
         return time_arrays, px_bary, py_bary, mx_bary, my_bary
 
@@ -271,6 +276,7 @@ def pandora(
     epoch_distance,
     supersampling_factor,
     occult_small_threshold,
+    hill_sphere_threshold
 ):
 
     # Make sure to work with floats. Large values as ints would overflow.
@@ -361,13 +367,11 @@ def pandora(
 
     # Check physical plausibility of a_moon
     # Should be inside [Roche lobe, Hill sphere] plus/minus some user-set margin
-    # Hill
-    hill_limit = 1.2
     M_star = ((4 * pi**2 / G) * ((a_planet*R_star)**3)) / (per_planet * day) **2
     r_hill = (a_planet) * (M_planet / (3 * M_star)) ** (1/3)
     r_hill_fraction = a_moon / r_hill
 
-    if r_hill_fraction > hill_limit:
+    if r_hill_fraction > hill_sphere_threshold:
         unphysical = True
     else:
         unphysical = False
@@ -378,20 +382,28 @@ def pandora(
     roche_limit = (roche_constant * r_planet ** (1/3))
     print("roche_limit (planetary radii)", roche_limit)
 
-
-
-    xm_bary, ym_bary, xp_bary, yp_bary = ellipse_pos_iter_bary(
-            a=a_moon,
-            per=per_moon,
-            tau=tau_moon,
-            Omega=Omega_moon,
-            i=i_moon,
-            time=time,
-            transit_threshold_x=transit_threshold_x,
-            xp=xp,
-            mass_ratio=mass_ratio,
-            b_planet=b_planet
-        )
+    # Unphysical moon orbit: Keep planet, but put moon at far out of transit position
+    if unphysical:  
+        bignum = 1e8
+        xp_bary = xp
+        yp_bary = np.full(len(xp), b_planet)
+        xm_bary = np.full(len(xp), bignum)
+        ym_bary = xm_bary.copy()
+        z_moon = sqrt(xm_bary ** 2 + ym_bary ** 2)
+    # Valid, physical system
+    else:
+        xm_bary, ym_bary, xp_bary, yp_bary = ellipse_pos_iter_bary(
+                a=a_moon,
+                per=per_moon,
+                tau=tau_moon,
+                Omega=Omega_moon,
+                i=i_moon,
+                time=time,
+                transit_threshold_x=transit_threshold_x,
+                xp=xp,
+                mass_ratio=mass_ratio,
+                b_planet=b_planet
+            )
 
     # Distances of planet and moon from (0,0) = center of star
     z_planet = sqrt(xp_bary ** 2 + yp_bary ** 2)
