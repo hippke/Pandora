@@ -273,6 +273,22 @@ def pandora(
     occult_small_threshold,
 ):
 
+    # Make sure to work with floats. Large values as ints would overflow.
+    R_star = float(R_star)
+    per_planet = float(per_planet)
+    a_planet = float(a_planet)
+    r_planet = float(r_planet)
+    b_planet = float(b_planet)
+    t0_planet = float(t0_planet)
+    t0_planet_offset = float(t0_planet_offset)  
+    M_planet = float(M_planet)
+    r_moon = float(r_moon)
+    per_moon = float(per_moon)
+    tau_moon = float(tau_moon)
+    Omega_moon = float(Omega_moon)
+    i_moon = float(i_moon)
+    mass_ratio = float(mass_ratio)
+
     # "Morphological light-curve distortions due to finite integration time"
     # https://ui.adsabs.harvard.edu/abs/2010MNRAS.408.1758K/abstract
     # Data gets smeared over long integration. Relevant for e.g., 30min cadences
@@ -301,6 +317,8 @@ def pandora(
     G = 6.67408e-11
     day = 60 * 60 * 24
     a_moon = (G * (M_planet + mass_ratio * M_planet) / (2 * pi / (per_moon * day)) ** 2) ** (1/3)
+    a_moon /= R_star
+
     # t0_planet_offset in [days] ==> convert to x scale (i.e. 0.5 transit dur radius)
     t0_shift_planet = t0_planet_offset / (tdur_p / 2)
 
@@ -336,13 +354,34 @@ def pandora(
     # If the threshold is too tight, it will make the result totally wrong
     # one semimajor axis + half one for bary wobble + transit dur + 2r planet
     # Maximum: A binary system mass_ratio = 1; from numerical experiments 3*a is OK
-    transit_threshold_x = 3 * (a_moon / R_star) + 2 * r_planet + 2 * r_moon
+    transit_threshold_x = 3 * a_moon + 2 * r_planet + 2 * r_moon
     if transit_threshold_x < 2:
         transit_threshold_x = 2
     #print("transit_threshold_x", transit_threshold_x)
 
+    # Check physical plausibility of a_moon
+    # Should be inside [Roche lobe, Hill sphere] plus/minus some user-set margin
+    # Hill
+    hill_limit = 1.2
+    M_star = ((4 * pi**2 / G) * ((a_planet*R_star)**3)) / (per_planet * day) **2
+    r_hill = (a_planet) * (M_planet / (3 * M_star)) ** (1/3)
+    r_hill_fraction = a_moon / r_hill
+
+    if r_hill_fraction > hill_limit:
+        unphysical = True
+    else:
+        unphysical = False
+    print("r_hill", r_hill, "a_moon", a_moon, "hill fraction", r_hill_fraction)
+
+    # Roche
+    roche_constant = 1.25992
+    roche_limit = (roche_constant * r_planet ** (1/3))
+    print("roche_limit (planetary radii)", roche_limit)
+
+
+
     xm_bary, ym_bary, xp_bary, yp_bary = ellipse_pos_iter_bary(
-            a=a_moon / R_star,
+            a=a_moon,
             per=per_moon,
             tau=tau_moon,
             Omega=Omega_moon,
