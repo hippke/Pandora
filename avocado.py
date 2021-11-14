@@ -44,21 +44,21 @@ def ellipse_pos_iter(a, per, tau, Omega, i, time, transit_threshold_x, xp):
     #          It would physically still be OK, because it is circular and wraps
     #          around. However, the sampler would not converge when testing models.
     # So, we use tau in [0..1] and propagate to following epochs manually
-    tau_per = tau * per
+    l = len(time)
     O = Omega / 180 * pi
     i = i / 180 * pi
-    x = np.zeros(len(time))
-    y = x.copy()
-    for idx in prange(len(time)):
+    x = np.empty(l)
+    y = np.empty(l)
+    for idx in range(l):
         if abs(xp[idx]) > transit_threshold_x:  # can not be transiting
             x[idx] = np.inf
         else:
             # all of these cos(float) are zero cost at runtime (pre-calc at compile)
             # expensive: arctan(tan(...)), sin(Q), cos(Q) in each iteration
             # re-writing with extra variables gains nothing
-            k = tan((pi * (time[idx] - tau_per) / per))
+            k = tan((pi * (time[idx] - tau * per) / per))
 
-            # faster to substitute out the arctan, tan and sin this way:
+            # MUCH faster to substitute out the arctan, tan and sin this way:
             # \cos(2 \arctan(\tan(k))) = \frac{1 - \tan^2(k)}{1 + \tan^2(k)}
             # \sin(2 \arctan(\tan(k))) = \frac{2 \tan(k)}{1 + \tan^2(k)}
             cos_Q = (1 - k ** 2) / (1 + k ** 2)
@@ -67,6 +67,52 @@ def ellipse_pos_iter(a, per, tau, Omega, i, time, transit_threshold_x, xp):
             x[idx] = (cos(O) * cos_Q - sin(O) * sin_Q * cos(i)) * a
             y[idx] = (sin(O) * cos_Q + cos(O) * sin_Q * cos(i)) * a
     return x, y
+
+
+@jit(cache=False, nopython=True, fastmath=True, parallel=False)
+def ellipse_pos_iter_bary(a, per, tau, Omega, i, time, transit_threshold_x, xp, mass_ratio, b_planet):
+    """2D x-y Kepler solver WITHOUT eccentricity, WITHOUT mass"""
+
+    # Scale tau to period
+    # tau_moon is the position of the moon on its orbit, given as [0..1]
+    # for the first timestamp of the first epoch
+    # Cannot be given in units of days in prior, because moon orbit period varies
+    # Example: Prior has tau in [5, 100] but model tests orbit with per_moon = 10
+    #          It would physically still be OK, because it is circular and wraps
+    #          around. However, the sampler would not converge when testing models.
+    # So, we use tau in [0..1] and propagate to following epochs manually
+    bignum = 1.e8  # a float certainly out of transit. Cannot use np.inf in numba
+    l = len(time)
+    O = Omega / 180 * pi
+    i = i / 180 * pi
+    xm_bary = np.full(l, bignum)
+    ym_bary = xm_bary.copy()
+    xp_bary = xm_bary.copy()
+    yp_bary = xm_bary.copy()
+
+    for idx in prange(l):
+        if abs(xp[idx]) < transit_threshold_x:  # can not be transiting
+            # all of these cos(float) are zero cost at runtime (pre-calc at compile)
+            # expensive: arctan(tan(...)), sin(Q), cos(Q) in each iteration
+            # re-writing with extra variables gains nothing
+            k = tan((pi * (time[idx] - tau * per) / per))
+
+            # MUCH faster to substitute out the arctan, tan and sin this way:
+            # \cos(2 \arctan(\tan(k))) = \frac{1 - \tan^2(k)}{1 + \tan^2(k)}
+            # \sin(2 \arctan(\tan(k))) = \frac{2 \tan(k)}{1 + \tan^2(k)}
+            cos_Q = (1 - k ** 2) / (1 + k ** 2)
+            sin_Q = (2 * k) / ((1 + k ** 2))
+
+            x = (cos(O) * cos_Q - sin(O) * sin_Q * cos(i)) * a
+            y = (sin(O) * cos_Q + cos(O) * sin_Q * cos(i)) * a
+
+            xm_bary[idx] = x + xp[idx] + x * mass_ratio
+            ym_bary[idx] = y + b_planet + y * mass_ratio
+            xp_bary[idx] = xp[idx] - x * mass_ratio
+            yp_bary[idx] = b_planet - y * mass_ratio
+            #print(mass_ratio, xm_bary[idx], ym_bary[idx], xp_bary[idx], yp_bary[idx])
+
+    return xm_bary, ym_bary, xp_bary, yp_bary
 
 
 

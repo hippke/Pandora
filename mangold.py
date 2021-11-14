@@ -9,7 +9,7 @@
 # - Overall speed improvements: ~10%
 
 from numba import jit, prange
-from numpy import pi, sqrt, arccos, abs, log, zeros, ravel, ones
+from numpy import pi, sqrt, arccos, abs, log, ones, empty
 
 HALF_PI = 0.5 * pi
 INV_PI = 1 / pi
@@ -34,7 +34,7 @@ def circle_circle_intersection_area(r1, r2, b):
 def occult_small(zs, k, u1, u2):
     i = zs.size
     f = ones(i)
-    m = f.copy()
+    m = empty(i)
     b = abs(zs)
     s = 2 * pi * 1 / 12 * (-2 * u1 - u2 + 6)
     for j in range(i):
@@ -58,7 +58,7 @@ def ellpicb(n, k):
     which is translated from J. Eastman's IDL routine
     in EXOFAST (Eastman et al. 2013, PASP 125, 83)"""
 
-    kc = sqrt(1 - k ** 2)
+    e = kc = sqrt(1 - k ** 2)
     e = kc
     p = sqrt(n + 1)
     m0 = 1
@@ -97,9 +97,9 @@ def ellec(k):
     )
 
 
+# A version with cached log(m1) (from main func) is slower
 @jit(cache=False, nopython=True, fastmath=True)
 def ellk(k):
-    #return 1
     a0 = 1.386294361120
     a1 = 0.096663442590
     a2 = 0.035900923830
@@ -135,15 +135,16 @@ def occult(zs, k, u1, u2):
         k = 0.5
 
     k2 = k ** 2
-    flux = zeros(len(zs))
-    le = flux.copy()
-    ld = flux.copy()
-    ed = flux.copy()
+    lzs = len(zs)
+    flux = empty(lzs)
+    le = empty(lzs)
+    ld = empty(lzs)
+    ed = empty(lzs)
     omega = 1 / (1 - u1 / 3 - u2 / 6)
     c1 = (1 - u1 - 2 * u2)
     c2 = (u1 + 2 * u2)
 
-    for i in prange(len(zs)):
+    for i in prange(lzs):
         z = zs[i]
 
         if abs(z - k) < 1e-6:

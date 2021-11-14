@@ -1,8 +1,11 @@
 from numba import jit, prange
 from numpy import sqrt, pi, arcsin
 import numpy as np
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
 
-from avocado import ellipse_pos, ellipse_pos_iter
+from avocado import ellipse_pos, ellipse_pos_iter, ellipse_pos_iter_bary
 from mangold import occult, occult_small
 from helpers import resample
 # from pumpkin import eclipse_ratio
@@ -31,7 +34,7 @@ class model_params(object):
         self.tau_moon = None
         self.Omega_moon = None
         self.i_moon = None
-        self.M_moon = None
+        self.mass_ratio = None
 
         # Other model parameters
         self.epochs = None
@@ -62,11 +65,11 @@ class moon_model(object):
 
         # Moon parameters
         self.r_moon = params.r_moon
-        self.per_moon = params.a_moon
+        self.per_moon = params.per_moon
         self.tau_moon = params.tau_moon
         self.Omega_moon = params.Omega_moon
         self.i_moon = params.i_moon
-        self.M_moon = params.M_moon
+        self.mass_ratio = params.mass_ratio
 
         # Other model parameters
         self.epochs = params.epochs
@@ -76,11 +79,11 @@ class moon_model(object):
         self.supersampling_factor = params.supersampling_factor
         self.occult_small_threshold = params.occult_small_threshold
 
-    def evaluate(self):
-        self.flux_planet, self.flux_moon, self.flux_total, self.px_bary, self.py_bary, self.x_bary, self.my_bary, self.time_arrays = pandora(        
+    def video(self, limb_darkening=True, teff=6000, planet_color="black", moon_color="black"):
+        self.flux_planet, self.flux_moon, self.flux_total, self.px_bary, self.py_bary, self.mx_bary, self.my_bary, self.time_arrays = pandora(        
             self.u1,
             self.u2,
-            R_star,
+            self.R_star,
 
             # Planet parameters
             self.per_planet,
@@ -97,7 +100,7 @@ class moon_model(object):
             self.tau_moon,
             self.Omega_moon,
             self.i_moon,
-            self.M_moon,
+            self.mass_ratio,
 
             # Other model parameters
             self.epochs,
@@ -107,13 +110,75 @@ class moon_model(object):
             self.supersampling_factor,
             self.occult_small_threshold
         )
-        return time_arrays, flux_total, flux_planet, flux_moon
+        # Build video with matplotlib
+        fig = plt.figure(figsize = (5,5))
+        axes = fig.add_subplot(111)
+        plt.axis('off')
+        plt.style.use('dark_background')
+        plt.gcf().gca().add_artist(plt.Circle((0, 0), 5, color="black"))
+        if limb_darkening:
+            s = 100
+            if teff > 12000:
+                teff = 12000
+            if teff < 2300:
+                teff = 2300
+            star_colors = np.genfromtxt('star_colors.csv', delimiter=',')
+            row = np.argmax(star_colors[:,0] >= teff)
+            r_star = star_colors[row,1]
+            g_star = star_colors[row,2]
+            b_star = star_colors[row,3]
+            for i in reversed(range(s)):
+                impact = (i / s)
+                m = sqrt(1 - min(impact**2, 1))
+                ld = (1 - self.u1 * (1 - m) - self.u2 * (1 - m) ** 2)
+                r = r_star * ld
+                g = g_star * ld
+                b = b_star * ld
+                Sun = plt.Circle((0, 0), impact, color=(r, g, b))
+                plt.gcf().gca().add_artist(Sun)
+        else:
+            plt.gcf().gca().add_artist(plt.Circle((0, 0), 1, color="yellow"))
+
+        axes.set_xlim(-1.05, 1.05)
+        axes.set_ylim(-1.05, 1.05)
+        moon, = axes.plot(
+            self.mx_bary[0],
+            self.my_bary[0],
+            'o',
+            color=planet_color,
+            markerfacecolor=moon_color,
+            markeredgecolor=moon_color,
+            markersize=175 * self.r_moon
+        )
+        planet, = axes.plot(
+            self.px_bary[0],
+            self.py_bary[0], 
+            'o', 
+            color=planet_color,
+            markeredgecolor=planet_color,
+            markerfacecolor=planet_color,
+            markersize=175 * self.r_planet
+        )
+
+        def ani(coords):
+            moon.set_data(coords[0],coords[1])
+            planet.set_data(coords[2],coords[3])
+            pbar.update(1)
+            return moon, planet
+
+        def frames():
+            for mx, my, px, py in zip(self.mx_bary, self.my_bary, self.px_bary, self.py_bary):
+                yield mx, my, px, py
+
+        pbar = tqdm(total=len(self.mx_bary))
+        ani = FuncAnimation(fig, ani, frames=frames, save_count=1e15, blit=True)
+        return ani
 
     def light_curve(self):
         flux_planet, flux_moon, flux_total, px_bary, py_bary, mx_bary, my_bary, time_arrays = pandora(        
             self.u1,
             self.u2,
-            R_star,
+            self.R_star,
 
             # Planet parameters
             self.per_planet,
@@ -130,7 +195,7 @@ class moon_model(object):
             self.tau_moon,
             self.Omega_moon,
             self.i_moon,
-            self.M_moon,
+            self.mass_ratio,
 
             # Other model parameters
             self.epochs,
@@ -146,7 +211,7 @@ class moon_model(object):
         flux_planet, flux_moon, flux_total, px_bary, py_bary, mx_bary, my_bary, time_arrays = pandora(        
             self.u1,
             self.u2,
-            R_star,
+            self.R_star,
 
             # Planet parameters
             self.per_planet,
@@ -163,7 +228,7 @@ class moon_model(object):
             self.tau_moon,
             self.Omega_moon,
             self.i_moon,
-            self.M_moon,
+            self.mass_ratio,
 
             # Other model parameters
             self.epochs,
@@ -197,7 +262,7 @@ def pandora(
     tau_moon,
     Omega_moon,
     i_moon,
-    M_moon,
+    mass_ratio,
 
     # Other model parameters
     epochs,
@@ -207,6 +272,7 @@ def pandora(
     supersampling_factor,
     occult_small_threshold,
 ):
+
     # "Morphological light-curve distortions due to finite integration time"
     # https://ui.adsabs.harvard.edu/abs/2010MNRAS.408.1758K/abstract
     # Data gets smeared over long integration. Relevant for e.g., 30min cadences
@@ -234,8 +300,7 @@ def pandora(
     # Calculate moon period around planet
     G = 6.67408e-11
     day = 60 * 60 * 24
-    a_moon = (G * (M_planet + M_moon) / (2 * pi / (per_moon * day)) ** 2 ) ** (1/3)
-
+    a_moon = (G * (M_planet + mass_ratio * M_planet) / (2 * pi / (per_moon * day)) ** 2) ** (1/3)
     # t0_planet_offset in [days] ==> convert to x scale (i.e. 0.5 transit dur radius)
     t0_shift_planet = t0_planet_offset / (tdur_p / 2)
 
@@ -245,12 +310,14 @@ def pandora(
     cadences = int(supersampled_cadences_per_day * epoch_duration)
 
     # Loop over epochs and stitch together:
-    time = np.ones(shape=(epochs, cadences))
-    xp = time.copy()
+    # np.empty much faster than np.ones
+    time = np.empty(shape=(epochs, cadences))
+    xp = np.empty(shape=(epochs, cadences))
+    
     xpos = epoch_duration / tdur_p
     xpos_array = np.linspace(-xpos, xpos, cadences)
 
-    for epoch in range(epochs):
+    for epoch in range(epochs):  
         time[epoch] = np.linspace(t_starts[epoch], t_ends[epoch], cadences)
 
         # Push planet following per_planet, which is a free parameter in [days]
@@ -262,15 +329,19 @@ def pandora(
 
     time = time.ravel()
     xp = xp.ravel()
-
+    
     # Select segment in xp array close enough to star so that ellipse CAN transit
-    # 3x r_planet: 2*r_planet because bary wobble up to one planet diameter
-    # Should this rather be: (tdur_p/2) ?
-    # If the threhold is too generous, it only costs compute.
+    # If the threshold is too generous, it only costs compute.
+    # it was too tight with semimajor + 3rp + tdur
     # If the threshold is too tight, it will make the result totally wrong
-    transit_threshold_x = a_moon / R_star + (3 * r_planet) + tdur_p
+    # one semimajor axis + half one for bary wobble + transit dur + 2r planet
+    # Maximum: A binary system mass_ratio = 1; from numerical experiments 3*a is OK
+    transit_threshold_x = 3 * (a_moon / R_star) + 2 * r_planet + 2 * r_moon
+    if transit_threshold_x < 2:
+        transit_threshold_x = 2
+    #print("transit_threshold_x", transit_threshold_x)
 
-    xm, ym = ellipse_pos_iter(
+    xm_bary, ym_bary, xp_bary, yp_bary = ellipse_pos_iter_bary(
             a=a_moon / R_star,
             per=per_moon,
             tau=tau_moon,
@@ -278,18 +349,10 @@ def pandora(
             i=i_moon,
             time=time,
             transit_threshold_x=transit_threshold_x,
-            xp=xp
+            xp=xp,
+            mass_ratio=mass_ratio,
+            b_planet=b_planet
         )
-
-    # Add barycentric correction to planet and moon as function of mass ratio
-    # Negligible runtime (<1%): No benefit from skipping for out of transit parts
-    mass_ratio = M_moon / M_planet
-    if mass_ratio > 1:
-        mass_ratio = 1
-    xm_bary = xm + xp + xm * mass_ratio
-    ym_bary = ym + b_planet + ym * mass_ratio
-    xp_bary = xp - xm * mass_ratio
-    yp_bary = b_planet - ym * mass_ratio
 
     # Distances of planet and moon from (0,0) = center of star
     z_planet = sqrt(xp_bary ** 2 + yp_bary ** 2)
