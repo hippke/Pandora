@@ -182,3 +182,27 @@ Example:
 
    Sizes of planet and moon may not be pixel-perfect due to scaling done by Matplotlib.
    
+
+
+Convert limb darkening priors
+---------------------------------------
+
+.. def:: helpers.ld_convert
+
+Parameters: 
+
+:q1: :q2: (*float*): Priors [0..1] as provided by the sampler's unit hypercube
+
+
+
+Returns:
+
+:u1: :u2: (*float*) Limb darkening parameter u1, u2 for quadratic limb darkening calculation
+
+
+Example:
+
+::
+
+   from pandora.helpers import ld_convert
+   u1, u2 = ld_convert(q1=0.4, q2=0.6)
