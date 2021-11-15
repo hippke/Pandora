@@ -110,13 +110,12 @@ def ellipse_pos_iter_bary(a, per, tau, Omega, i, time, transit_threshold_x, xp, 
             ym_bary[idx] = y + b_planet + y * mass_ratio
             xp_bary[idx] = xp[idx] - x * mass_ratio
             yp_bary[idx] = b_planet - y * mass_ratio
-            #print(mass_ratio, xm_bary[idx], ym_bary[idx], xp_bary[idx], yp_bary[idx])
 
     return xm_bary, ym_bary, xp_bary, yp_bary
 
 
 
-#@jit(cache=False, nopython=True, fastmath=True)
+@jit(cache=False, nopython=True, fastmath=True)
 def ellipse_pos_eccentricity(a, per, e, tau, Omega, w, i, time):
     """2D x-y Kepler solver WITH eccentricity, WITHOUT mass"""
 

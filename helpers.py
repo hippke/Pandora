@@ -10,3 +10,9 @@ def resample(arr, factor):
         end = start + factor - 1
         out_arr[idx] = np.mean(arr[start:end])
     return out_arr
+
+
+def ld_convert(q1, q2):
+    u1 = 2 * np.sqrt(q1) * q2
+    u2 = np.sqrt(q1) * (1 - 2 * q2)
+    return u1, u2
