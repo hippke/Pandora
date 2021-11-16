@@ -48,7 +48,7 @@ Other model parameters:
 :supersampling_factor: (*int*) (Optional parameter, default value: 1). In the default 1 = no supersampling. Higher values compensate for morphological deformation at the cost of computational expense.
 :occult_small_threshold: (*float*) (Optional parameter, default value: 0.01) If the moon radius (R_S/R_star) is smaller than this value, its occultation is approximated with constant limb darkening under its area. To obtain a precise estimate even for very small moons, set `occult_small_threshold` to a very small value (e.g., 1e-8).
 :hill_sphere_threshold: (*float*) (Optional parameter, default value: 1.1) If the moon semimajor axis is larger than *hill_sphere_threshold*, the moon is considered unphysical. Then, a planet-only model is returned. The usual threshold should be *hill_sphere_threshold=1*. To keep unphysical systems, set a high value, e.g. *hill_sphere_threshold=100*.
-:numerical_grid: (*int*) (Optional parameter, default value: 25) Diameter of numerical grid to estimate planet-moon occultation in case at least one body is on the stellar limb.
+:numerical_grid: (*int*) (Optional parameter, default value: 25) Diameter in pixels of numerical grid to estimate planet-moon occultation in case at least one body is on the stellar limb. A value of 25 (100) pixels corresponds to an accuracy <1 ppm (<0.25ppm).
 
 .. note::
 
