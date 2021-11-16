@@ -152,6 +152,7 @@ Parameters:
 :teff: (*float*) Star temperature in [2300..12000] K to draw the star color according to "Digital color codes of stars" ([Harre & Heller 2021](https://arxiv.org/pdf/2101.06254.pdf)).
 :planet_color: (*string*) A matplotlib color for the planet. Default: "black".
 :moon_color: (*string*) A matplotlib color for the moon. Default: "black".
+:ld_circles: (*int*) Number of concentric circles used to paint the limb-darkened star
 
 
 .. _returnvalues:
@@ -168,7 +169,8 @@ Example:
        limb_darkening=True, 
        teff=3000, 
        planet_color="black",
-       moon_color="black"
+       moon_color="black",
+       ld_circles=200
    )
    video.save(filename="video.mp4", fps=10, dpi=200)
 
