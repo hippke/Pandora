@@ -1,5 +1,5 @@
 import numpy as np
-from numpy import sqrt, pi, arcsin
+from numpy import sqrt, pi, arcsin, cos
 from numba import jit
 from tqdm import tqdm
 import matplotlib.pyplot as plt
@@ -20,6 +20,8 @@ class model_params(object):
         self.a_bary = None
         self.r_planet = None
         self.b_bary = None
+        self.w_bary = 0
+        self.ecc_bary = 90
         self.t0_bary = None
         self.t0_bary_offset = None        
         self.M_planet = None
@@ -57,6 +59,8 @@ class moon_model(object):
         self.a_bary = params.a_bary
         self.r_planet = params.r_planet
         self.b_bary = params.b_bary
+        self.w_bary = params.w_bary
+        self.ecc_bary = params.ecc_bary
         self.t0_bary = params.t0_bary
         self.t0_bary_offset = params.t0_bary_offset        
         self.M_planet = params.M_planet
@@ -90,6 +94,8 @@ class moon_model(object):
             self.a_bary,
             self.r_planet,
             self.b_bary,
+            self.w_bary,
+            self.ecc_bary,
             self.t0_bary,
             self.t0_bary_offset,   
             self.M_planet,
@@ -186,6 +192,8 @@ class moon_model(object):
             self.a_bary,
             self.r_planet,
             self.b_bary,
+            self.w_bary,
+            self.ecc_bary,
             self.t0_bary,
             self.t0_bary_offset,   
             self.M_planet,
@@ -221,6 +229,8 @@ class moon_model(object):
             self.a_bary,
             self.r_planet,
             self.b_bary,
+            self.w_bary,
+            self.ecc_bary,
             self.t0_bary,
             self.t0_bary_offset,   
             self.M_planet,
@@ -246,7 +256,7 @@ class moon_model(object):
         return time_arrays, px, py, mx, my
 
 
-@jit(cache=False, nopython=True, fastmath=True, parallel=False)
+#@jit(cache=False, nopython=True, fastmath=True, parallel=False)
 def pandora(
     u1,
     u2,
@@ -257,6 +267,8 @@ def pandora(
     a_bary,
     r_planet,
     b_bary,
+    w_bary,
+    ecc_bary,
     t0_bary,
     t0_bary_offset,   
     M_planet,
@@ -318,7 +330,12 @@ def pandora(
     # Formally correct would be: (R_star+r_planet) for the transit duration T1-T4
     # Here, however, we need points where center of planet is on stellar limb
     # https://www.paulanthonywilson.com/exoplanets/exoplanet-detection-techniques/the-exoplanet-transit-method/
-    tdur_p = per_bary / pi * arcsin(1 / a_bary)
+    tdur = per_bary / pi * arcsin(1 / a_bary)
+
+    # Correct transit duration based on relative orbital velocity 
+    # of circular versus eccentric case
+    if ecc_bary > 0:
+        tdur /= 1 / sqrt(1 - ecc_bary ** 2) * (1 + ecc_bary * cos(w_bary / 180 * pi))
 
     # Calculate moon period around planet
     G = 6.67408e-11
@@ -327,7 +344,7 @@ def pandora(
     a_moon /= R_star
 
     # t0_bary_offset in [days] ==> convert to x scale (i.e. 0.5 transit dur radius)
-    t0_shift_planet = t0_bary_offset / (tdur_p / 2)
+    t0_shift_planet = t0_bary_offset / (tdur / 2)
 
     # arrays of epoch start and end dates [day]
     t_starts = ti_planet_transit_times - epoch_duration / 2
@@ -338,7 +355,7 @@ def pandora(
     time = np.empty(shape=(epochs, cadences))
     x_bary = np.empty(shape=(epochs, cadences))
     
-    xpos = epoch_duration / tdur_p
+    xpos = epoch_duration / tdur
     xpos_array = np.linspace(-xpos, xpos, cadences)
 
     for epoch in range(epochs):  
@@ -347,7 +364,7 @@ def pandora(
         # Push planet following per_bary, which is a free parameter in [days]
         # For reference: Distance between epoch segments is fixed as segment_distance
         # Have to convert to x scale == 0.5 transit duration for stellar radii
-        per_shift_planet = ((per_bary - epoch_distance) * epoch) / (tdur_p / 2)
+        per_shift_planet = ((per_bary - epoch_distance) * epoch) / (tdur / 2)
 
         x_bary[epoch] = xpos_array - t0_shift_planet - per_shift_planet
 

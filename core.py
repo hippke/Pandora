@@ -24,15 +24,15 @@ def circle_circle_intersection_area(r1, r2, b):
 def occult_small(zs, k, u1, u2):
     i = zs.size
     f = np.ones(i)
-    m = np.empty(i)
     b = abs(zs)
     s = 2 * pi * 1 / 12 * (-2 * u1 - u2 + 6)
+    s_inv = 1 / s
     for j in range(i):
-        m[j] = sqrt(1 - min(b[j] ** 2, 1))
+        m = sqrt(1 - min(b[j] ** 2, 1))
         if b[j] < 1 + k:
-            l = 1 - u1 * (1 - m[j]) - u2 * (1 - m[j]) ** 2
+            l = 1 - u1 * (1 - m) - u2 * (1 - m) ** 2
             a = circle_circle_intersection_area(1, k, b[j])
-            f[j] = (s - l * a) / s
+            f[j] = (s - l * a) * s_inv
     return f
 
 
@@ -110,7 +110,7 @@ def ellk(k):
 # Modified by Michael Hippke 2021, based on a GPL3 license
 # Modifications: 
 # - Restricted to quadratic limb-darkening
-# - Caching a few expensive values from sqrt calcs
+# - Caching a few expensive values, e.g. from sqrt
 # - Replaced some array generations with floats or copies
 # - Overall speed improvements: ~10%
 
