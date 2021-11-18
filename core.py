@@ -265,32 +265,32 @@ def occult(zs, k, u1, u2):
 
 
 @jit(nopython=True, fastmath=True)
-def ellipse(a, per, tau, Omega, i, time, transit_threshold_x, xp, mass_ratio, b_planet):
+def ellipse(a, per, tau, Omega, i, time, transit_threshold_x, x_bary, mass_ratio, b_bary):
     """2D x-y Kepler solver without eccentricity"""
 
     bignum = 1.0e8  # a float for px = out of transit (no np.inf in numba)
     l = len(time)
     O = Omega / 180 * pi
     i = i / 180 * pi
-    xm_bary = np.full(l, bignum)
-    ym_bary = xm_bary.copy()
-    xp_bary = xm_bary.copy()
-    yp_bary = xm_bary.copy()
+    xm = np.full(l, bignum)
+    ym = xm.copy()
+    xp = xm.copy()
+    yp = xm.copy()
     a_planet = (a * mass_ratio) / (1 + mass_ratio)
     a_moon = a - a_planet
 
     for idx in range(l):
-        if abs(xp[idx]) < transit_threshold_x:
+        if abs(x_bary[idx]) < transit_threshold_x:
             k = tan((pi * (time[idx] - tau * per) / per))
             cos_Q = (1 - k ** 2) / (1 + k ** 2)
             sin_Q = (2 * k) / ((1 + k ** 2))
-            coord_x = (cos(O) * cos_Q - sin(O) * sin_Q * cos(i))
-            coord_y = (sin(O) * cos_Q + cos(O) * sin_Q * cos(i))
-            xm_bary[idx] = +coord_x * a_moon + xp[idx]
-            ym_bary[idx] = +coord_y * a_moon + b_planet
-            xp_bary[idx] = -coord_x * a_planet + xp[idx]
-            yp_bary[idx] = -coord_y * a_planet + b_planet
-    return xm_bary, ym_bary, xp_bary, yp_bary
+            vector_x = (cos(O) * cos_Q - sin(O) * sin_Q * cos(i))
+            vector_y = (sin(O) * cos_Q + cos(O) * sin_Q * cos(i))
+            xm[idx] = +vector_x * a_moon + x_bary[idx]
+            ym[idx] = +vector_y * a_moon + b_bary
+            xp[idx] = -vector_x * a_planet + x_bary[idx]
+            yp[idx] = -vector_y * a_planet + b_bary
+    return xm, ym, xp, yp
 
 
 @jit(nopython=True, fastmath=True)
@@ -359,38 +359,63 @@ def eclipse_ratio(distance_planet_moon, r_planet, r_moon):
     return eclipse_ratio
 
 
+
 @jit(nopython=True, fastmath=True)
-def pixelart(x_p, y_p, x_m, y_m, r_planet, r_moon, axis_px):
-    r_star = (1 / r_moon) * axis_px
-    image = np.zeros((axis_px + 1, axis_px + 1))
-    anti_aliasing = -0.5 * 1 / axis_px
+def pixelart_moon_cache(numerical_grid):
+    """
+    Numerical 3-body overlap is build on 3 images painted on top of each other:
+    1. Moon which fully fills the numerical grid (moon diameter = grid width)
+       This routine paints the moon. It never changes. Therefore we cache it.
+    2. Star, 3. Planet -- both according to their size and distance
+
+    Problem: Sometimes numba crashes. Hard to debug...
+    """
+    numerical_grid = 25
+    moon_cache = np.zeros((numerical_grid + 1, numerical_grid + 1))
+    anti_aliasing = -0.5 * 1 / numerical_grid
+    color_moon = 0.3
+    for x in range(numerical_grid + 1):
+        for y in range(numerical_grid + 1):
+            d_moon = sqrt((numerical_grid - 2 * x) ** 2 + (numerical_grid - 2 * y) ** 2)
+            if d_moon < (numerical_grid - anti_aliasing):
+                moon_cache[x, y] += color_moon
+    return moon_cache
+
+
+
+@jit(nopython=True, fastmath=True)
+def pixelart(xp, yp, xm, ym, r_planet, r_moon, numerical_grid):#, moon_cache):
+    r_star = (1 / r_moon) * numerical_grid
+    #image = moon_cache
+    image = np.zeros((numerical_grid + 1, numerical_grid + 1))
+    anti_aliasing = -0.5 * 1 / numerical_grid
     color_star = 0.5
     color_moon = 0.3
     color_planet = 0.2
 
-    for x in range(axis_px + 1):
-        for y in range(axis_px + 1):
+    for x in range(numerical_grid + 1):
+        for y in range(numerical_grid + 1):
             d_star = sqrt(
-                (x_m * r_star + 2 * x - axis_px) ** 2
-                + (y_m * r_star + 2 * y - axis_px) ** 2
+                (xm * r_star + 2 * x - numerical_grid) ** 2
+                + (ym * r_star + 2 * y - numerical_grid) ** 2
             )
             if d_star < r_star - anti_aliasing:
                 image[x, y] = color_star
-
-            d_moon = sqrt((axis_px - 2 * x) ** 2 + (axis_px - 2 * y) ** 2)
-            if d_moon < (axis_px - anti_aliasing):
+            
+            d_moon = sqrt((numerical_grid - 2 * x) ** 2 + (numerical_grid - 2 * y) ** 2)
+            if d_moon < (numerical_grid - anti_aliasing):
                 image[x, y] += color_moon
-
+            
             d_planet = sqrt(
-                ((-(x_p - x_m) * r_star) + 2 * x - axis_px) ** 2
-                + ((-(y_p - y_m) * r_star) + 2 * y - axis_px) ** 2
+                ((-(xp - xm) * r_star) + 2 * x - numerical_grid) ** 2
+                + ((-(yp - ym) * r_star) + 2 * y - numerical_grid) ** 2
             )
-            if d_planet < (r_planet / r_moon) * axis_px - anti_aliasing:
+            if d_planet < (r_planet / r_moon) * numerical_grid - anti_aliasing:
                 image[x, y] += color_planet
 
-    moon_sum_analytical = pi * ((axis_px) / 2) ** 2
+    moon_sum_analytical = pi * ((numerical_grid) / 2) ** 2
     moon_occult_frac = np.sum(image == 1) / moon_sum_analytical
-    cci = eclipse_ratio(sqrt(x_m ** 2 + y_m ** 2), 1, r_moon)
+    cci = eclipse_ratio(sqrt(xm ** 2 + ym ** 2), 1, r_moon)
     if cci > 0:
         return min(1, (1 - ((cci - moon_occult_frac) / cci)))
     else:
@@ -398,11 +423,11 @@ def pixelart(x_p, y_p, x_m, y_m, r_planet, r_moon, axis_px):
 
 
 @jit(nopython=True, fastmath=True)
-def eclipse(x_p, y_p, x_m, y_m, r_planet, r_moon, flux_moon, numerical_grid):
+def eclipse(xp, yp, xm, ym, r_planet, r_moon, flux_moon, numerical_grid):
     """Checks if planet-moon occultation present. If yes, returns adjusted moon flux.
     Parameters
     ----------
-    x_p, y_p, x_m, y_m : float
+    xp, yp, x_m, ym : float
         Planet and moon coordinates. Normalized so that R_star = 1 at (0,0)
     r_planet, r_moon : float
         Planet and moon radii. Normalized so that R_star = 1
@@ -420,38 +445,51 @@ def eclipse(x_p, y_p, x_m, y_m, r_planet, r_moon, flux_moon, numerical_grid):
     # Case 2: Occultation, both bodies on star or off star --> 2-circle intersect
     # Case 3: Occultation, any body on limb --> Numerical solution
 
-    planet_moon_occultation = False
-    on_limb = False
+    moon_cache_available = False
+    for idx in range(len(xp)):
+        planet_moon_occultation = False
+        on_limb = False
 
-    # Check if moon or planet are on stellar limb
-    if abs(1 - (sqrt(x_m ** 2 + y_m ** 2))) < (r_moon):
-        on_limb = True
-    if abs(1 - (sqrt(x_p ** 2 + y_p ** 2))) < (r_planet):
-        on_limb = True
+        # Check if moon or planet are on stellar limb
+        if abs(1 - (sqrt(xm[idx] ** 2 + ym[idx] ** 2))) < (r_moon):
+            on_limb = True
+        if abs(1 - (sqrt(xp[idx] ** 2 + yp[idx] ** 2))) < (r_planet):
+            on_limb = True
 
-    # Check if planet-moon occultation
-    distance_p_m = sqrt((x_m - x_p) ** 2 + (y_m - y_p) ** 2)
-    if abs(distance_p_m) < (r_planet + r_moon):
-        planet_moon_occultation = True
+        # Check if planet-moon occultation
+        distance_p_m = sqrt((xm[idx] - xp[idx]) ** 2 + (ym[idx] - yp[idx]) ** 2)
+        if abs(distance_p_m) < (r_planet + r_moon):
+            planet_moon_occultation = True
 
-    # Case 1: No occultation
-    else:
-        return flux_moon
+        # Case 1: No occultation
+        else:
+            continue
 
-    # Case 2: Occultation, both bodies on star or off star --> 2 circle intersect
-    if planet_moon_occultation and not on_limb:
-        er = eclipse_ratio(distance_p_m, r_planet, r_moon)
+        # Case 2: Occultation, both bodies on star or off star --> 2 circle intersect
+        if planet_moon_occultation and not on_limb:
+            er = eclipse_ratio(distance_p_m, r_planet, r_moon)
 
-    # Case 3: Occultation, any body on limb --> 3 circle intersect
-    # HERE: ADD FEWELL WHEN READY
-    if planet_moon_occultation and on_limb:
-        er = pixelart(x_p, y_p, x_m, y_m, r_planet, r_moon, numerical_grid)
+        # Case 3: Occultation, any body on limb --> numerical estimate with pixel-art
+        if planet_moon_occultation and on_limb:
+            #if not moon_cache_available:
+            #    moon_cache = pixelart_moon_cache(numerical_grid)
+            #    moon_cache_available = True
+            er = pixelart(
+                xp[idx], 
+                yp[idx], 
+                xm[idx], 
+                ym[idx], 
+                r_planet, 
+                r_moon, 
+                numerical_grid 
+                #moon_cache.copy()
+            )
 
-    # For Cases 2+3: Calculate reduced moon flux
-    if er > 0:
-        flux_moon = -(1 - flux_moon) * 10 ** 6
-        flux_moon = flux_moon * (1 - er)
-        flux_moon = 1 - (-flux_moon * 10 ** -6)
+        # For Cases 2+3: Calculate reduced moon flux
+        if er > 0:
+            flux_moon[idx] = -(1 - flux_moon[idx]) * 10 ** 6
+            flux_moon[idx] = flux_moon[idx] * (1 - er)
+            flux_moon[idx] = 1 - (-flux_moon[idx] * 10 ** -6)
     return flux_moon
 
 
