@@ -36,4 +36,4 @@ video.save(filename="video.mp4", fps=25, dpi=200)
 
 
 ### Installation
-Install with `pip install pandora`.
+Install with `pip install pandora-moon`.
