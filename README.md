@@ -21,3 +21,7 @@ Try installing with `pip install pandora`. If that doesn't work, set up a fresh 
 conda create -n pandora python=3.10
 pip install cython numba matplotlib numpy ultranest pandora-moon
 ```
+
+### Create video
+
+![Video](https://github.com/hippke/Pandora/blob/main/docs/source/video_image.png?raw=true)
