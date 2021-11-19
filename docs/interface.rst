@@ -39,6 +39,8 @@ Moon parameters:
 :tau_moon: *(float)*  Time of periapsis passage [0..1] normalized by period. Should be a free parameter.
 :Omega_moon: *(float)* Longitude of the ascending node [0..360 deg]. Should be a free parameter.
 :i_moon: *(float)* Orbit inclination [0..360 deg]. Should be a free parameter.
+:ecc_moon: *(float)* [0..1] Moon eccentricity
+:w_moon: (*float*) [0..360 deg] Moon argument of periapsis of barycenter
 :mass_ratio: *(float)* [0..1]. Mass ratio M_moon / M_planet. Should be a free parameter.
 
 Other model parameters:
