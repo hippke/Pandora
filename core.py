@@ -1,5 +1,5 @@
 import numpy as np
-from numpy import sqrt, pi, sin, cos, arcsin, arccos, abs, log, tan, arctan
+from numpy import sqrt, pi, sin, cos, arcsin, arccos, abs, log, tan, arctan, ceil, fliplr, flipud
 from numba import jit
 
 
@@ -108,11 +108,12 @@ def ellk(k):
 # Routine from: PyTransit: fast and easy exoplanet transit modelling in Python
 # Copyright (C) 2010-2020  Hannu Parviainen
 # Modified by Michael Hippke 2021, based on a GPL3 license
-# Modifications: 
+# Modifications:
 # - Restricted to quadratic limb-darkening
 # - Caching a few expensive values, e.g. from sqrt
 # - Replaced some array generations with floats or copies
 # - Overall speed improvements: ~10%
+
 
 @jit(nopython=True, fastmath=True)
 def occult(zs, k, u1, u2):
@@ -265,7 +266,9 @@ def occult(zs, k, u1, u2):
 
 
 @jit(nopython=True, fastmath=True)
-def ellipse(a, per, tau, Omega, i, time, transit_threshold_x, x_bary, mass_ratio, b_bary):
+def ellipse(
+    a, per, tau, Omega, i, time, transit_threshold_x, x_bary, mass_ratio, b_bary
+):
     """2D x-y Kepler solver without eccentricity"""
 
     bignum = 1.0e8  # a float for px = out of transit (no np.inf in numba)
@@ -284,8 +287,8 @@ def ellipse(a, per, tau, Omega, i, time, transit_threshold_x, x_bary, mass_ratio
             k = tan((pi * (time[idx] - tau * per) / per))
             cos_Q = (1 - k ** 2) / (1 + k ** 2)
             sin_Q = (2 * k) / ((1 + k ** 2))
-            vector_x = (cos(O) * cos_Q - sin(O) * sin_Q * cos(i))
-            vector_y = (sin(O) * cos_Q + cos(O) * sin_Q * cos(i))
+            vector_x = cos(O) * cos_Q - sin(O) * sin_Q * cos(i)
+            vector_y = sin(O) * cos_Q + cos(O) * sin_Q * cos(i)
             xm[idx] = +vector_x * a_moon + x_bary[idx]
             ym[idx] = +vector_y * a_moon + b_bary
             xp[idx] = -vector_x * a_planet + x_bary[idx]
@@ -359,40 +362,32 @@ def eclipse_ratio(distance_planet_moon, r_planet, r_moon):
     return eclipse_ratio
 
 
-
 @jit(nopython=True, fastmath=True)
-def pixelart_moon_cache(numerical_grid):
-    """
-    Numerical 3-body overlap is build on 3 images painted on top of each other:
-    1. Moon which fully fills the numerical grid (moon diameter = grid width)
-       This routine paints the moon. It never changes. Therefore we cache it.
-    2. Star, 3. Planet -- both according to their size and distance
+def pixelart(xp, yp, xm, ym, r_planet, r_moon, numerical_grid):
+    if numerical_grid % 2 == 0:  # assure pixel number is odd for perfect circle
+        numerical_grid += 1
+    r_star = (1 / r_moon) * numerical_grid
+    image = np.zeros((numerical_grid + 1, numerical_grid + 1), dtype="int8")
+    anti_aliasing = -0.5 / numerical_grid
+    color_star = 5
+    color_moon = 3
+    color_planet = 2
 
-    Problem: Sometimes numba crashes. Hard to debug...
-    """
-    numerical_grid = 25
-    moon_cache = np.zeros((numerical_grid + 1, numerical_grid + 1))
-    anti_aliasing = -0.5 * 1 / numerical_grid
-    color_moon = 0.3
-    for x in range(numerical_grid + 1):
-        for y in range(numerical_grid + 1):
+    # Paint moon circle by painting one quarter, flipping it over, and rolling it down
+    # Faster by ~7% than painting naively full circle, because it saves 3/4 of sqrt calcs
+
+    # Paint upper left corner
+    mid = int(ceil(numerical_grid / 2))
+    for x in range(mid):
+        for y in range(mid):
             d_moon = sqrt((numerical_grid - 2 * x) ** 2 + (numerical_grid - 2 * y) ** 2)
             if d_moon < (numerical_grid - anti_aliasing):
-                moon_cache[x, y] += color_moon
-    return moon_cache
+                image[x, y] = color_moon
 
+    image[mid:,:mid] = flipud(image[:mid:,:mid]) # Copy upper left to upper right
+    image[:,mid:] = fliplr(image[:,:mid])  # Copy upper half to lower half
 
-
-@jit(nopython=True, fastmath=True)
-def pixelart(xp, yp, xm, ym, r_planet, r_moon, numerical_grid):#, moon_cache):
-    r_star = (1 / r_moon) * numerical_grid
-    #image = moon_cache
-    image = np.zeros((numerical_grid + 1, numerical_grid + 1))
-    anti_aliasing = -0.5 * 1 / numerical_grid
-    color_star = 0.5
-    color_moon = 0.3
-    color_planet = 0.2
-
+    # Now add planet and star
     for x in range(numerical_grid + 1):
         for y in range(numerical_grid + 1):
             d_star = sqrt(
@@ -400,12 +395,8 @@ def pixelart(xp, yp, xm, ym, r_planet, r_moon, numerical_grid):#, moon_cache):
                 + (ym * r_star + 2 * y - numerical_grid) ** 2
             )
             if d_star < r_star - anti_aliasing:
-                image[x, y] = color_star
-            
-            d_moon = sqrt((numerical_grid - 2 * x) ** 2 + (numerical_grid - 2 * y) ** 2)
-            if d_moon < (numerical_grid - anti_aliasing):
-                image[x, y] += color_moon
-            
+                image[x, y] += color_star
+
             d_planet = sqrt(
                 ((-(xp - xm) * r_star) + 2 * x - numerical_grid) ** 2
                 + ((-(yp - ym) * r_star) + 2 * y - numerical_grid) ** 2
@@ -414,7 +405,7 @@ def pixelart(xp, yp, xm, ym, r_planet, r_moon, numerical_grid):#, moon_cache):
                 image[x, y] += color_planet
 
     moon_sum_analytical = pi * ((numerical_grid) / 2) ** 2
-    moon_occult_frac = np.sum(image == 1) / moon_sum_analytical
+    moon_occult_frac = np.sum(image == 10) / moon_sum_analytical
     cci = eclipse_ratio(sqrt(xm ** 2 + ym ** 2), 1, r_moon)
     if cci > 0:
         return min(1, (1 - ((cci - moon_occult_frac) / cci)))
@@ -471,18 +462,18 @@ def eclipse(xp, yp, xm, ym, r_planet, r_moon, flux_moon, numerical_grid):
 
         # Case 3: Occultation, any body on limb --> numerical estimate with pixel-art
         if planet_moon_occultation and on_limb:
-            #if not moon_cache_available:
+            # if not moon_cache_available:
             #    moon_cache = pixelart_moon_cache(numerical_grid)
             #    moon_cache_available = True
             er = pixelart(
-                xp[idx], 
-                yp[idx], 
-                xm[idx], 
-                ym[idx], 
-                r_planet, 
-                r_moon, 
-                numerical_grid 
-                #moon_cache.copy()
+                xp[idx],
+                yp[idx],
+                xm[idx],
+                ym[idx],
+                r_planet,
+                r_moon,
+                numerical_grid
+                # moon_cache.copy()
             )
 
         # For Cases 2+3: Calculate reduced moon flux
