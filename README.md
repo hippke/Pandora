@@ -30,7 +30,7 @@ plt.plot(time, flux_moon, color="red")
 plt.plot(time, flux_total, color="black")
 plt.show()
 ```
-
+![lc](https://github.com/hippke/Pandora/blob/main/docs/source/lc_image.png?raw=true)
 
 ### Create video
 With Pandora, you can create transit videos to understand, teach, and explore exomoon transits. Try it out:
