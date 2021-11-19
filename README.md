@@ -45,7 +45,7 @@ video = model.video(
 )
 video.save(filename="video.mp4", fps=25, dpi=200)
 ```
-Videos should approximate the true situation as calculated by Pandora very well. They are, however, not pixel-perfect due to the underlying Matplotlib rendering.
+Videos approximate the true lightcurve as calculated by Pandora very well. They are, however, not pixel-perfect due to the underlying Matplotlib render engine.
 
 
 ![Video](https://github.com/hippke/Pandora/blob/main/docs/source/video_image.png?raw=true)
