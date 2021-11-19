@@ -16,6 +16,21 @@ Pandora employs an analytical photodynamical model, including:
 - Bayesian evidence calculation and model comparison
 
 
+### Create transit lightcurve
+```
+import pandora
+params = pandora.model_params()
+params.per_bary = 365.25  # [days] 169.7
+# (...) See tutorials for list of parameters
+model = pandora.moon_model(params)
+time, flux_total, flux_planet, flux_moon = model.light_curve()
+
+plt.plot(time, flux_planet, color="blue")
+plt.plot(time, flux_moon, color="red")
+plt.plot(time, flux_total, color="black")
+plt.show()
+```
+
 
 ### Create video
 With Pandora, you can create transit videos to understand, teach, and explore exomoon transits. Try it out:
