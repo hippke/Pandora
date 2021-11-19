@@ -4,7 +4,7 @@ from numba import jit
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
-from core import ellipse, occult, occult_small, eclipse, resample
+from core import eclipse, ellipse, ellipse_ecc, occult, occult_small, resample
 
 
 class model_params(object):
@@ -32,6 +32,8 @@ class model_params(object):
         self.tau_moon = None
         self.Omega_moon = None
         self.i_moon = None
+        self.ecc_moon = 0
+        self.w_moon = 0
         self.mass_ratio = None
 
         # Other model parameters
@@ -63,13 +65,14 @@ class moon_model(object):
         self.t0_bary = params.t0_bary
         self.t0_bary_offset = params.t0_bary_offset
         self.M_planet = params.M_planet
-
         # Moon parameters
         self.r_moon = params.r_moon
         self.per_moon = params.per_moon
         self.tau_moon = params.tau_moon
         self.Omega_moon = params.Omega_moon
         self.i_moon = params.i_moon
+        self.ecc_moon = params.ecc_moon
+        self.w_moon = params.w_moon
         self.mass_ratio = params.mass_ratio
 
         # Other model parameters
@@ -119,6 +122,8 @@ class moon_model(object):
             self.tau_moon,
             self.Omega_moon,
             self.i_moon,
+            self.ecc_moon,
+            self.w_moon,
             self.mass_ratio,
             # Other model parameters
             self.epochs,
@@ -214,6 +219,8 @@ class moon_model(object):
             self.tau_moon,
             self.Omega_moon,
             self.i_moon,
+            self.ecc_moon,
+            self.w_moon,
             self.mass_ratio,
             # Other model parameters
             self.epochs,
@@ -248,6 +255,8 @@ class moon_model(object):
             self.tau_moon,
             self.Omega_moon,
             self.i_moon,
+            self.ecc_moon,
+            self.w_moon,
             self.mass_ratio,
             # Other model parameters
             self.epochs,
@@ -283,6 +292,8 @@ def pandora(
     tau_moon,
     Omega_moon,
     i_moon,
+    ecc_moon,
+    w_moon,
     mass_ratio,
     # Other model parameters
     epochs,
@@ -409,18 +420,33 @@ def pandora(
         ym = xm.copy()
         z_moon = sqrt(xm ** 2 + ym ** 2)
     else:  # valid, physical system
-        xm, ym, xp, yp = ellipse(
-            a=a_moon,
-            per=per_moon,
-            tau=tau_moon,
-            Omega=Omega_moon,
-            i=i_moon,
-            time=time,
-            transit_threshold_x=transit_threshold_x,
-            x_bary=x_bary,
-            mass_ratio=mass_ratio,
-            b_bary=b_bary,
-        )
+        if ecc_moon == 0:
+            xm, ym, xp, yp = ellipse(
+                a=a_moon,
+                per=per_moon,
+                tau=tau_moon,
+                Omega=Omega_moon,
+                i=i_moon,
+                time=time,
+                transit_threshold_x=transit_threshold_x,
+                x_bary=x_bary,
+                mass_ratio=mass_ratio,
+                b_bary=b_bary,
+            )
+        else:
+            xm, ym, xp, yp = ellipse_ecc(
+                a=a_moon,
+                per=per_moon,
+                e=ecc_moon,
+                tau=tau_moon,
+                Omega=Omega_moon,
+                w=w_moon,
+                i=i_moon,
+                time=time,
+                mass_ratio=mass_ratio,
+                x_bary=x_bary,
+                b_bary=b_bary,
+            )
 
     # Distances of planet and moon from (0,0) = center of star
     z_planet = sqrt(xp ** 2 + yp ** 2)

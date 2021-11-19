@@ -297,14 +297,13 @@ def ellipse(
 
 
 @jit(nopython=True, fastmath=True)
-def ellipse_pos_eccentricity(a, per, e, tau, Omega, w, i, time):
+def ellipse_ecc(a, per, e, tau, Omega, w, i, time, mass_ratio, x_bary, b_bary):
     """2D x-y Kepler solver WITH eccentricity"""
 
-    tau = tau * (per)  # Scale tau to period
-    M = (2 * pi / per) * (time - tau)
+    M = (2 * pi / per) * (time - (tau * per))
     flip = False
     M = M - (np.floor(M / (2 * pi)) * 2 * pi)
-    if M > pi:
+    if M.any() > pi:
         M = 2 * pi - M
         flip = True
     alpha = (3 * pi ** 2 + 1.6 * pi * (pi - abs(M)) / (1 + e)) / (pi ** 2 - 6)
@@ -321,13 +320,20 @@ def ellipse_pos_eccentricity(a, per, e, tau, Omega, w, i, time):
     k = n - f0 / (f1 + 0.5 * h * f2 + h ** 2 * (1 - f1) / 6 + h ** 3 * (-f2) / 24)
     if flip:
         k = 2 * pi - k
-    r = a * (1 - e * cos(k))
+    r = -(1 - e * cos(k))
+
     wf = (w / 180 * pi) + (arctan(sqrt((1 + e) / (1 - e)) * tan(k / 2)) * 2)
     v1 = sin(wf) * cos((i / 180 * pi))
-    x = (cos((Omega / 180 * pi)) * cos(wf) - sin((Omega / 180 * pi)) * v1) * r
-    y = (sin((Omega / 180 * pi)) * cos(wf) + cos((Omega / 180 * pi)) * v1) * r
-    # z = (sin(wf) * sin((i / 180 * pi))) * r
-    return x, y
+    vector_x = (cos((Omega / 180 * pi)) * cos(wf) - sin((Omega / 180 * pi)) * v1) * r
+    vector_y = (sin((Omega / 180 * pi)) * cos(wf) + cos((Omega / 180 * pi)) * v1) * r
+
+    a_planet = (a * mass_ratio) / (1 + mass_ratio)
+    a_moon = a - a_planet
+    xm = +vector_x * a_moon + x_bary
+    ym = +vector_y * a_moon + b_bary
+    xp = -vector_x * a_planet + x_bary
+    yp = -vector_y * a_planet + b_bary
+    return xm, ym, xp, yp
 
 
 @jit(nopython=True, fastmath=True)
@@ -374,7 +380,7 @@ def pixelart(xp, yp, xm, ym, r_planet, r_moon, numerical_grid):
     color_planet = 2
 
     # Paint moon circle by painting one quarter, flipping it over, and rolling it down
-    # Faster by ~7% than painting naively full circle, because it saves 3/4 of sqrt calcs
+    # Faster than painting naively the full circle, because it saves 3/4 of sqrt calcs
 
     # Paint upper left corner
     mid = int(ceil(numerical_grid / 2))
