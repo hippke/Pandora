@@ -45,6 +45,8 @@ video = model.video(
 )
 video.save(filename="video.mp4", fps=25, dpi=200)
 ```
+Videos should approximate the true situation as calculated by Pandora very well. They are, however, not pixel-perfect due to the underlying Matplotlib rendering.
+
 
 ![Video](https://github.com/hippke/Pandora/blob/main/docs/source/video_image.png?raw=true)
 
