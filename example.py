@@ -36,12 +36,14 @@ params.epoch_duration = 0.6  # 5  # [days]
 params.cadences_per_day = 250  # [int]
 params.epoch_distance = 365.25   # [days] value close to per_planet, but not identical
 params.supersampling_factor = 1  # [int]
-params.occult_small_threshold = 0.00001  # [0..1]
+params.occult_small_threshold = 0.1  # [0..1]
 params.hill_sphere_threshold = 1.2
 
 
 model = pandora.moon_model(params)
 time, flux_total, flux_planet, flux_moon = model.light_curve()
+print(np.sum(flux_total))
+assert np.sum(flux_total) == 148.78575762424862
 
 # Create noise and merge with flux
 noise_level = 100e-6  # Gaussian noise to be added to the generated data

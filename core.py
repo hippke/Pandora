@@ -4,19 +4,20 @@ from numba import jit
 
 
 @jit(nopython=True, fastmath=True)
-def circle_circle_intersection_area(r1, r2, b):
-    """Area of the intersection of two circles."""
-    if r1 < b - r2:
+def cci(r1, r2, d):
+    """Calculates area of asymmetric "lens" in which two circles intersect
+    Source: http://mathworld.wolfram.com/Circle-CircleIntersection.html"""
+    if r1 < d - r2:
         return 0
-    elif r1 >= b + r2:
+    elif r1 >= d + r2:
         return pi * r2 ** 2
-    elif b - r2 <= -r1:
+    elif d - r2 <= -r1:
         return pi * r1 ** 2
     else:
         return (
-            r2 ** 2 * arccos((b ** 2 + r2 ** 2 - r1 ** 2) / (2 * b * r2))
-            + r1 ** 2 * arccos((b ** 2 + r1 ** 2 - r2 ** 2) / (2 * b * r1))
-            - 0.5 * sqrt((-b + r2 + r1) * (b + r2 - r1) * (b - r2 + r1) * (b + r2 + r1))
+            r2 ** 2 * arccos((d ** 2 + r2 ** 2 - r1 ** 2) / (2 * d * r2))
+            + r1 ** 2 * arccos((d ** 2 + r1 ** 2 - r2 ** 2) / (2 * d * r1))
+            - 0.5 * sqrt((-d + r2 + r1) * (d + r2 - r1) * (d - r2 + r1) * (d + r2 + r1))
         )
 
 
@@ -30,9 +31,9 @@ def occult_small(zs, k, u1, u2):
     for j in range(i):
         m = sqrt(1 - min(b[j] ** 2, 1))
         if b[j] < 1 + k:
-            l = 1 - u1 * (1 - m) - u2 * (1 - m) ** 2
-            a = circle_circle_intersection_area(1, k, b[j])
-            f[j] = (s - l * a) * s_inv
+            limb_darkening = 1 - u1 * (1 - m) - u2 * (1 - m) ** 2
+            area = cci(1, k, b[j])
+            f[j] = (s - limb_darkening * area) * s_inv
     return f
 
 
@@ -113,8 +114,6 @@ def ellk(k):
 # - Caching a few expensive values, e.g. from sqrt
 # - Replaced some array generations with floats or copies
 # - Overall speed improvements: ~10%
-
-
 @jit(nopython=True, fastmath=True)
 def occult(zs, k, u1, u2):
     """Evaluates the transit model for an array of normalized distances.
@@ -323,9 +322,10 @@ def ellipse_ecc(a, per, e, tau, Omega, w, i, time, mass_ratio, x_bary, b_bary):
     r = -(1 - e * cos(k))
 
     wf = (w / 180 * pi) + (arctan(sqrt((1 + e) / (1 - e)) * tan(k / 2)) * 2)
-    v1 = sin(wf) * cos((i / 180 * pi))
-    vector_x = (cos((Omega / 180 * pi)) * cos(wf) - sin((Omega / 180 * pi)) * v1) * r
-    vector_y = (sin((Omega / 180 * pi)) * cos(wf) + cos((Omega / 180 * pi)) * v1) * r
+    v = sin(wf) * cos((i / 180 * pi))
+    O = Omega / 180 * pi
+    vector_x = (cos(O) * cos(wf) - sin(O) * v) * r
+    vector_y = (sin(O) * cos(wf) + cos(O) * v) * r
 
     a_planet = (a * mass_ratio) / (1 + mass_ratio)
     a_moon = a - a_planet
@@ -334,18 +334,6 @@ def ellipse_ecc(a, per, e, tau, Omega, w, i, time, mass_ratio, x_bary, b_bary):
     xp = -vector_x * a_planet + x_bary
     yp = -vector_y * a_planet + b_bary
     return xm, ym, xp, yp
-
-
-@jit(nopython=True, fastmath=True)
-def circle_circle_intersect(r1, r2, d):
-    """Calculates area of asymmetric "lens" in which two circles intersect
-    Source: http://mathworld.wolfram.com/Circle-CircleIntersection.html"""
-
-    return (
-        r1 ** 2 * (arccos(((d ** 2) + (r1 ** 2) - (r2 ** 2)) / (2 * d * r1)))
-        + ((r2 ** 2) * (arccos((((d ** 2) + (r2 ** 2) - (r1 ** 2)) / (2 * d * r2)))))
-        - (0.5 * sqrt((-d + r1 + r2) * (d + r1 - r2) * (d - r1 + r2) * (d + r1 + r2)))
-    )
 
 
 @jit(nopython=True, fastmath=True)
@@ -362,7 +350,7 @@ def eclipse_ratio(distance_planet_moon, r_planet, r_moon):
     if eclipsing:
         if distance_planet_moon == 0:
             distance_planet_moon = 1e-10
-        eclipse_ratio = circle_circle_intersect(r_planet, r_moon, distance_planet_moon)
+        eclipse_ratio = cci(r_planet, r_moon, distance_planet_moon)
         # ...and transform this value into how much AREA is really eclipsed
         eclipse_ratio = eclipse_ratio / (pi * r_moon ** 2)
     return eclipse_ratio
@@ -378,9 +366,11 @@ def pixelart(xp, yp, xm, ym, r_planet, r_moon, numerical_grid):
     color_star = 5
     color_moon = 3
     color_planet = 2
+    all_colors = color_star + color_moon + color_planet
 
     # Paint moon circle by painting one quarter, flipping it over, and rolling it down
     # Faster than painting naively the full circle, because it saves 3/4 of sqrt calcs
+    # Caching this part is a good idea, but the gain is very small and not worth it
 
     # Paint upper left corner
     mid = int(ceil(numerical_grid / 2))
@@ -410,8 +400,9 @@ def pixelart(xp, yp, xm, ym, r_planet, r_moon, numerical_grid):
             if d_planet < (r_planet / r_moon) * numerical_grid - anti_aliasing:
                 image[x, y] += color_planet
 
+
     moon_sum_analytical = pi * ((numerical_grid) / 2) ** 2
-    moon_occult_frac = np.sum(image == 10) / moon_sum_analytical
+    moon_occult_frac = np.sum(image == all_colors) / moon_sum_analytical
     cci = eclipse_ratio(sqrt(xm ** 2 + ym ** 2), 1, r_moon)
     if cci > 0:
         return min(1, (1 - ((cci - moon_occult_frac) / cci)))
