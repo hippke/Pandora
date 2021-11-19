@@ -64,36 +64,41 @@ Example:
 
    import pandora
    params = pandora.model_params()
-   R_sun = 696_342_000  # [m]
-   params.R_star = 0.9 * R_sun
-   params.u1 = 0.4
-   params.u2 = 0.6
+   R_sun = 696342000
+   params.R_star = 1 * R_sun  # [m]
+   params.u1 = 0.4089  # [0..1]
+   params.u2 = 0.2556  # [0..1]
 
    # Planet parameters
-   params.per_planet = 365.25
-   params.a_planet = 217
-   params.r_planet = 0.1
-   params.b_planet = 0.3
-   params.t0_planet = 100
-   params.t0_planet_offset = 0.1
-   params.M_planet = 5e27
+   params.per_bary = 365.25  # [days]
+   params.a_bary = 215  # [R_star]
+   params.r_planet = 0.1  # [R_star]
+   params.b_bary = 0.3   # [0..1]
+   params.t0_bary = 11  # [days]
+   params.t0_bary_offset = 0  # [days]
+   params.M_planet = 1.8986e+27  # [kg]
+   params.w_bary = 0
+   params.ecc_bary = 0
 
    # Moon parameters
-   params.r_moon = 0.01
-   params.per_moon = 28
-   params.tau_moon = 0.25
-   params.Omega_moon = 5
-   params.i_moon = 85
-   params.M_moon = 5e21
+   params.r_moon = 0.03526 # [R_star]
+   params.per_moon = 0.3 # [days]
+   params.tau_moon = 0.07  # [0..1]
+   params.Omega_moon = 0  # [0..180]
+   params.i_moon = 80  # [0..180]
+   params.e_moon = 0.9
+   params.w_moon = 20
+   params.mass_ratio = 0.05395   #[0..1]
 
    # Other model parameters
-   params.epochs = 3
-   params.epoch_duration = 2.5
-   params.cadences_per_day = 48
-   params.epoch_distance = 365.25
-   params.supersampling_factor = 1
-   params.hill_sphere_threshold = 1
-   params.numerical_grid = 25
+   params.epochs = 1  # [int]
+   params.epoch_duration = 1  # 5  # [days]
+   params.cadences_per_day = 250  # [int]
+   params.epoch_distance = 365.25   # [days]
+   params.supersampling_factor = 1  # [int]
+   params.occult_small_threshold = 0.00001  # [0..1]
+   params.hill_sphere_threshold = 1.2
+
 
 
 Evaluate model and obtain lightcurve
