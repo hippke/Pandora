@@ -23,5 +23,17 @@ pip install cython numba matplotlib numpy ultranest pandora-moon
 ```
 
 ### Create video
+With Pandora, you can create transit videos to understand, teach, and explore exomoon transits. Try it out:
+
+```
+video = model.video(
+    limb_darkening=True, 
+    teff=3200,
+    planet_color="black",
+    moon_color="black",
+    ld_circles=100
+)
+video.save(filename="video.mp4", fps=25, dpi=200)
+```
 
 ![Video](https://github.com/hippke/Pandora/blob/main/docs/source/video_image.png?raw=true)
