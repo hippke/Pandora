@@ -15,12 +15,7 @@ Pandora employs an analytical photodynamical model, including:
 - Find moons with nested sampling using [UltraNest](https://github.com/JohannesBuchner/UltraNest), [dynesty](https://github.com/joshspeagle/dynesty), and other tools
 - Bayesian evidence calculation and model comparison
 
-### Installation
-Try installing with `pip install pandora`. If that doesn't work, set up a fresh [miniconda](https://docs.conda.io/en/latest/miniconda.html) environment:
-```
-conda create -n pandora python=3.10
-pip install cython numba matplotlib numpy ultranest pandora-moon
-```
+
 
 ### Create video
 With Pandora, you can create transit videos to understand, teach, and explore exomoon transits. Try it out:
@@ -37,3 +32,8 @@ video.save(filename="video.mp4", fps=25, dpi=200)
 ```
 
 ![Video](https://github.com/hippke/Pandora/blob/main/docs/source/video_image.png?raw=true)
+
+
+
+### Installation
+Install with `pip install pandora`.
