@@ -362,28 +362,31 @@ def pixelart(xp, yp, xm, ym, r_planet, r_moon, numerical_grid):
         numerical_grid += 1
     r_star = (1 / r_moon) * numerical_grid
     image = np.zeros((numerical_grid + 1, numerical_grid + 1), dtype="int8")
-    anti_aliasing = -0.5 / numerical_grid
-    color_star = 5
-    color_moon = 3
-    color_planet = 2
+    
+    color_star = 5    # arbitrary values, but useful for visualization
+    color_moon = 3    # the sum of the values must be unique to identify the
+    color_planet = 2  # total overlap: area of moon on star occulted by planet
     all_colors = color_star + color_moon + color_planet
 
     # Paint moon circle by painting one quarter, flipping it over, and rolling it down
     # Faster than painting naively the full circle, because it saves 3/4 of sqrt calcs
     # Caching this part is a good idea, but the gain is very small and not worth it
+    # A version here, which replaces the usual sqrt with **2, is ~5% faster
 
     # Paint upper left corner
+    anti_aliasing = np.sqrt(((numerical_grid+1)**2 - (numerical_grid**2))) / 2
     mid = int(ceil(numerical_grid / 2))
     for x in range(mid):
         for y in range(mid):
-            d_moon = sqrt((numerical_grid - 2 * x) ** 2 + (numerical_grid - 2 * y) ** 2)
-            if d_moon < (numerical_grid - anti_aliasing):
+            d_moon = (numerical_grid - 2 * x) ** 2 + (numerical_grid - 2 * y) ** 2
+            if d_moon < (numerical_grid**2 + anti_aliasing):
                 image[x, y] = color_moon
 
     image[mid:,:mid] = flipud(image[:mid:,:mid]) # Copy upper left to upper right
     image[:,mid:] = fliplr(image[:,:mid])  # Copy upper half to lower half
 
     # Now add planet and star
+    anti_aliasing = -0.5 / numerical_grid  # Now working with sqrt again
     for x in range(numerical_grid + 1):
         for y in range(numerical_grid + 1):
             d_star = sqrt(
@@ -399,7 +402,6 @@ def pixelart(xp, yp, xm, ym, r_planet, r_moon, numerical_grid):
             )
             if d_planet < (r_planet / r_moon) * numerical_grid - anti_aliasing:
                 image[x, y] += color_planet
-
 
     moon_sum_analytical = pi * ((numerical_grid) / 2) ** 2
     moon_occult_frac = np.sum(image == all_colors) / moon_sum_analytical
@@ -432,8 +434,6 @@ def eclipse(xp, yp, xm, ym, r_planet, r_moon, flux_moon, numerical_grid):
     # Case 1: No occultation
     # Case 2: Occultation, both bodies on star or off star --> 2-circle intersect
     # Case 3: Occultation, any body on limb --> Numerical solution
-
-    moon_cache_available = False
     for idx in range(len(xp)):
         planet_moon_occultation = False
         on_limb = False
@@ -459,9 +459,6 @@ def eclipse(xp, yp, xm, ym, r_planet, r_moon, flux_moon, numerical_grid):
 
         # Case 3: Occultation, any body on limb --> numerical estimate with pixel-art
         if planet_moon_occultation and on_limb:
-            # if not moon_cache_available:
-            #    moon_cache = pixelart_moon_cache(numerical_grid)
-            #    moon_cache_available = True
             er = pixelart(
                 xp[idx],
                 yp[idx],
@@ -470,7 +467,6 @@ def eclipse(xp, yp, xm, ym, r_planet, r_moon, flux_moon, numerical_grid):
                 r_planet,
                 r_moon,
                 numerical_grid
-                # moon_cache.copy()
             )
 
         # For Cases 2+3: Calculate reduced moon flux
