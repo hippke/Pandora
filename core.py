@@ -106,7 +106,8 @@ def ellk(k):
     )
 
 
-# Routine from: PyTransit: fast and easy exoplanet transit modelling in Python
+# Routine originally from: 
+# PyTransit: fast and easy exoplanet transit modelling in Python
 # Copyright (C) 2010-2020  Hannu Parviainen
 # Modified by Michael Hippke 2021, based on a GPL3 license
 # Modifications:
@@ -240,7 +241,7 @@ def occult(zs, k, u1, u2):
         # Occulting body transits the source:
         # Table 3, Case IV.:
         if k <= 1 and z < (1 - k):
-            q = sqrt((x2 - x1) / (1 - x1))  # recalc because different condition
+            q = sqrt((x2 - x1) / (1 - x1))  # re-calc because different condition
             ld[i] = (
                 2
                 / 9
@@ -369,24 +370,24 @@ def pixelart(xp, yp, xm, ym, r_planet, r_moon, numerical_grid):
     all_colors = color_star + color_moon + color_planet
 
     # Paint moon circle by painting one quarter, flipping it over, and rolling it down
-    # Faster than painting naively the full circle, because it saves 3/4 of sqrt calcs
-    # Caching this part is a good idea, but the gain is very small and not worth it
-    # A version here, which replaces the usual sqrt with **2, is ~5% faster
+    # Faster than painting naively the full circle, because it saves 3/4 of dist calcs
+    # Caching this part would be a good idea, but numba memory mgmt caused crashes
+    # The gain is very small anyways and the complexity not worth it
+    # The version here, which replaces the usual sqrt with **2, is ~5% faster
 
     # Paint upper left corner
-    anti_aliasing = np.sqrt(((numerical_grid+1)**2 - (numerical_grid**2))) / 2
+    anti_aliasing = np.sqrt(((numerical_grid + 1) ** 2 - (numerical_grid ** 2))) / 2
     mid = int(ceil(numerical_grid / 2))
     for x in range(mid):
         for y in range(mid):
             d_moon = (numerical_grid - 2 * x) ** 2 + (numerical_grid - 2 * y) ** 2
             if d_moon < (numerical_grid**2 + anti_aliasing):
                 image[x, y] = color_moon
-
     image[mid:,:mid] = flipud(image[:mid:,:mid]) # Copy upper left to upper right
     image[:,mid:] = fliplr(image[:,:mid])  # Copy upper half to lower half
 
     # Now add planet and star
-    anti_aliasing = -0.5 / numerical_grid  # Now working with sqrt again
+    anti_aliasing = -0.5 / numerical_grid  # Working with sqrt again
     for x in range(numerical_grid + 1):
         for y in range(numerical_grid + 1):
             d_star = sqrt(
