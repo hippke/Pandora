@@ -4,7 +4,7 @@ from numba import jit
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
-from core import eclipse, ellipse, ellipse_ecc, occult, occult_small, resample
+from core import eclipse, ellipse, ellipse_ecc, occult, occult_small, resample, timegrid, x_bary_grid
 
 
 class model_params(object):
@@ -45,6 +45,7 @@ class model_params(object):
         self.occult_small_threshold = 0.01
         self.hill_sphere_threshold = 1.1
         self.numerical_grid = 25
+        self.time = None
 
 
 class moon_model(object):
@@ -84,6 +85,14 @@ class moon_model(object):
         self.occult_small_threshold = params.occult_small_threshold
         self.hill_sphere_threshold = params.hill_sphere_threshold
         self.numerical_grid = params.numerical_grid
+        self.time = timegrid(
+            self.t0_bary, 
+            self.epochs, 
+            self.epoch_duration, 
+            self.cadences_per_day, 
+            self.epoch_distance, 
+            self.supersampling_factor
+        )
 
     def video(
         self,
@@ -134,6 +143,7 @@ class moon_model(object):
             self.occult_small_threshold,
             self.hill_sphere_threshold,
             self.numerical_grid,
+            self.time
         )
         # Build video with matplotlib
         fig = plt.figure(figsize=(5, 5))
@@ -231,6 +241,7 @@ class moon_model(object):
             self.occult_small_threshold,
             self.hill_sphere_threshold,
             self.numerical_grid,
+            self.time
         )
         return time_arrays, flux_total, flux_planet, flux_moon
 
@@ -267,11 +278,12 @@ class moon_model(object):
             self.occult_small_threshold,
             self.hill_sphere_threshold,
             self.numerical_grid,
+            self.time
         )
         return time_arrays, px, py, mx, my
 
 
-@jit(cache=False, nopython=True, fastmath=True, parallel=False)
+#@jit(cache=False, nopython=True, fastmath=True, parallel=False)
 def pandora(
     u1,
     u2,
@@ -304,9 +316,11 @@ def pandora(
     occult_small_threshold,
     hill_sphere_threshold,
     numerical_grid,
+    time
 ):
 
     # Make sure to work with floats. Large values as ints would overflow.
+    print(time)
     R_star = float(R_star)
     per_bary = float(per_bary)
     a_bary = float(a_bary)
@@ -322,35 +336,6 @@ def pandora(
     i_moon = float(i_moon)
     mass_ratio = float(mass_ratio)
 
-    # "Morphological light-curve distortions due to finite integration time"
-    # https://ui.adsabs.harvard.edu/abs/2010MNRAS.408.1758K/abstract
-    # Data gets smeared over long integration. Relevant for e.g., 30min cadences
-    # To counter the effect: Set supersampling_factor = 5 (recommended value)
-    # Then, 5x denser in time sampling, and averaging after, approximates effect
-    if supersampling_factor < 1:
-        print("supersampling_factor must be positive integer")
-    supersampled_cadences_per_day = cadences_per_day * int(supersampling_factor)
-
-    # epoch_distance is the fixed constant distance between subsequent data epochs
-    # Should be identical to the initial guess of the planetary period
-    # The planetary period `per_bary`, however, is a free parameter
-    ti_planet_transit_times = np.arange(
-        start=t0_bary,
-        stop=t0_bary + epoch_distance * epochs,
-        step=epoch_distance,
-    )
-
-    # Planetary transit duration at b=0 equals the width of the star
-    # Formally correct would be: (R_star+r_planet) for the transit duration T1-T4
-    # Here, however, we need points where center of planet is on stellar limb
-    # https://www.paulanthonywilson.com/exoplanets/exoplanet-detection-techniques/the-exoplanet-transit-method/
-    tdur = per_bary / pi * arcsin(1 / a_bary)
-
-    # Correct transit duration based on relative orbital velocity
-    # of circular versus eccentric case
-    if ecc_bary > 0:
-        tdur /= 1 / sqrt(1 - ecc_bary ** 2) * (1 + ecc_bary * cos(w_bary / 180 * pi))
-
     # Calculate moon period around planet
     G = 6.67408e-11
     day = 60 * 60 * 24
@@ -358,34 +343,26 @@ def pandora(
         G * (M_planet + mass_ratio * M_planet) / (2 * pi / (per_moon * day)) ** 2
     ) ** (1 / 3)
     a_moon /= R_star
-
-    # t0_bary_offset in [days] ==> convert to x scale (i.e. 0.5 transit dur radius)
-    t0_shift_planet = t0_bary_offset / (tdur / 2)
-
-    # arrays of epoch start and end dates [day]
-    t_starts = ti_planet_transit_times - epoch_duration / 2
-    t_ends = ti_planet_transit_times + epoch_duration / 2
-    cadences = int(supersampled_cadences_per_day * epoch_duration)
-
-    # Loop over epochs and stitch together:
-    time = np.empty(shape=(epochs, cadences))
-    x_bary = np.empty(shape=(epochs, cadences))
-
-    xpos = epoch_duration / tdur
-    xpos_array = np.linspace(-xpos, xpos, cadences)
-
-    for epoch in range(epochs):
-        time[epoch] = np.linspace(t_starts[epoch], t_ends[epoch], cadences)
-
-        # Push planet following per_bary, which is a free parameter in [days]
-        # For reference: Distance between epoch segments is fixed as segment_distance
-        # Have to convert to x scale == 0.5 transit duration for stellar radii
-        per_shift_planet = ((per_bary - epoch_distance) * epoch) / (tdur / 2)
-
-        x_bary[epoch] = xpos_array - t0_shift_planet - per_shift_planet
-
-    time = time.ravel()
-    x_bary = x_bary.ravel()
+    """
+    time = timegrid(
+        t0_bary, 
+        epochs, 
+        epoch_duration, 
+        cadences_per_day, 
+        epoch_distance, 
+        supersampling_factor
+    )
+    """
+    x_bary = x_bary_grid(
+        time, 
+        a_bary, 
+        per_bary, 
+        t0_bary, 
+        t0_bary_offset, 
+        epoch_distance, 
+        ecc_bary, 
+        w_bary
+    )
 
     # Select segment in x_bary array close enough to star so that ellipse CAN transit
     # If the threshold is too generous, it only costs compute.

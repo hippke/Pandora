@@ -31,19 +31,34 @@ params.w_moon = 20  # [deg]
 params.mass_ratio = 0.05395   # [0..1]
 
 # Other model parameters
-params.epochs = 1  # [int]
+params.epochs = 3  # [int]
 params.epoch_duration = 0.6  # 5  # [days]
 params.cadences_per_day = 250  # [int]
-params.epoch_distance = 365.25   # [days] value close to per_planet, but not identical
+params.epoch_distance = 365.26   # [days] value close to per_planet, but not identical
 params.supersampling_factor = 1  # [int]
 params.occult_small_threshold = 0.1  # [0..1]
 params.hill_sphere_threshold = 1.2
 
+from core import timegrid
+tg = timegrid(
+    params.t0_bary, 
+    params.epochs, 
+    params.epoch_duration, 
+    params.cadences_per_day, 
+    params.epoch_distance, 
+    params.supersampling_factor
+    )
+
 
 model = pandora.moon_model(params)
 time, flux_total, flux_planet, flux_moon = model.light_curve()
+time_arrays, xp, yp, xm, ym = model.coordinates()
 print(np.sum(flux_total))
-assert np.sum(flux_total) == 148.78575762424862
+assert np.abs(np.sum(flux_total) - 446.3670858674481) < 1e-10
+print(np.sum(time))
+assert np.abs(np.sum(time)-  169317.0) < 1e-10
+print(np.sum(xp* yp- xm+ ym))
+assert np.abs((np.sum(xp* yp- xm+ ym)) - 120.93732790340484) < 1e-10
 
 # Create noise and merge with flux
 noise_level = 100e-6  # Gaussian noise to be added to the generated data
