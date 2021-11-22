@@ -560,5 +560,4 @@ def x_bary_grid(time, a_bary, per_bary, t0_bary, t0_bary_offset, epoch_distance,
         
         time_from_nearest_midtransit = 2 * (time[idx] - ti_epoch_midtimes[epoch])
         x_bary[idx] = time_from_nearest_midtransit / tdur - t0_shift_planet - per_shift_planet
-    print("new per_shift_planet", per_shift_planet)
     return x_bary

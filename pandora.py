@@ -48,6 +48,26 @@ class model_params(object):
         self.time = None
 
 
+class time(object):
+    def __init__(self, params):
+        self.t0_bary = params.t0_bary
+        self.epochs = params.epochs
+        self.epoch_duration = params.epoch_duration
+        self.cadences_per_day = params.cadences_per_day
+        self.epoch_distance = params.epoch_distance
+        self.supersampling_factor = params.supersampling_factor
+
+    def grid(self):
+        return timegrid(
+            self.t0_bary, 
+            self.epochs, 
+            self.epoch_duration, 
+            self.cadences_per_day, 
+            self.epoch_distance, 
+            self.supersampling_factor
+        )
+
+
 class moon_model(object):
     def __init__(self, params):
 
@@ -77,22 +97,15 @@ class moon_model(object):
         self.mass_ratio = params.mass_ratio
 
         # Other model parameters
-        self.epochs = params.epochs
-        self.epoch_duration = params.epoch_duration
-        self.cadences_per_day = params.cadences_per_day
+        #self.epochs = params.epochs
+        #self.epoch_duration = params.epoch_duration
+        #self.cadences_per_day = params.cadences_per_day
         self.epoch_distance = params.epoch_distance
         self.supersampling_factor = params.supersampling_factor
         self.occult_small_threshold = params.occult_small_threshold
         self.hill_sphere_threshold = params.hill_sphere_threshold
         self.numerical_grid = params.numerical_grid
-        self.time = timegrid(
-            self.t0_bary, 
-            self.epochs, 
-            self.epoch_duration, 
-            self.cadences_per_day, 
-            self.epoch_distance, 
-            self.supersampling_factor
-        )
+        self.time = params.time
 
     def video(
         self,
@@ -135,9 +148,9 @@ class moon_model(object):
             self.w_moon,
             self.mass_ratio,
             # Other model parameters
-            self.epochs,
-            self.epoch_duration,
-            self.cadences_per_day,
+            #self.epochs,
+            #self.epoch_duration,
+            #self.cadences_per_day,
             self.epoch_distance,
             self.supersampling_factor,
             self.occult_small_threshold,
@@ -208,45 +221,10 @@ class moon_model(object):
         ani = FuncAnimation(fig, ani, frames=frames, save_count=1e15, blit=True)
         return ani
 
-    def light_curve(self):
-        flux_planet, flux_moon, flux_total, px, py, mx, my, time_arrays = pandora(
-            self.u1,
-            self.u2,
-            self.R_star,
-            # Planet parameters
-            self.per_bary,
-            self.a_bary,
-            self.r_planet,
-            self.b_bary,
-            self.w_bary,
-            self.ecc_bary,
-            self.t0_bary,
-            self.t0_bary_offset,
-            self.M_planet,
-            # Moon parameters
-            self.r_moon,
-            self.per_moon,
-            self.tau_moon,
-            self.Omega_moon,
-            self.i_moon,
-            self.ecc_moon,
-            self.w_moon,
-            self.mass_ratio,
-            # Other model parameters
-            self.epochs,
-            self.epoch_duration,
-            self.cadences_per_day,
-            self.epoch_distance,
-            self.supersampling_factor,
-            self.occult_small_threshold,
-            self.hill_sphere_threshold,
-            self.numerical_grid,
-            self.time
-        )
-        return time_arrays, flux_total, flux_planet, flux_moon
 
-    def coordinates(self):
-        flux_planet, flux_moon, flux_total, px, py, mx, my, time_arrays = pandora(
+
+    def light_curve(self, time):
+        flux_planet, flux_moon, flux_total, px, py, mx, my = pandora(
             self.u1,
             self.u2,
             self.R_star,
@@ -270,17 +248,54 @@ class moon_model(object):
             self.w_moon,
             self.mass_ratio,
             # Other model parameters
-            self.epochs,
-            self.epoch_duration,
-            self.cadences_per_day,
+            #self.epochs,
+            #self.epoch_duration,
+            #self.cadences_per_day,
             self.epoch_distance,
             self.supersampling_factor,
             self.occult_small_threshold,
             self.hill_sphere_threshold,
             self.numerical_grid,
-            self.time
+            time
         )
-        return time_arrays, px, py, mx, my
+        return flux_total, flux_planet, flux_moon
+
+    def coordinates(self, time):
+        flux_planet, flux_moon, flux_total, px, py, mx, my = pandora(
+            self.u1,
+            self.u2,
+            self.R_star,
+            # Planet parameters
+            self.per_bary,
+            self.a_bary,
+            self.r_planet,
+            self.b_bary,
+            self.w_bary,
+            self.ecc_bary,
+            self.t0_bary,
+            self.t0_bary_offset,
+            self.M_planet,
+            # Moon parameters
+            self.r_moon,
+            self.per_moon,
+            self.tau_moon,
+            self.Omega_moon,
+            self.i_moon,
+            self.ecc_moon,
+            self.w_moon,
+            self.mass_ratio,
+            # Other model parameters
+            #self.epochs,
+            #self.epoch_duration,
+            #self.cadences_per_day,
+            self.epoch_distance,
+            self.supersampling_factor,
+            self.occult_small_threshold,
+            self.hill_sphere_threshold,
+            self.numerical_grid,
+            time
+        )
+        return px, py, mx, my
 
 
 #@jit(cache=False, nopython=True, fastmath=True, parallel=False)
@@ -308,9 +323,9 @@ def pandora(
     w_moon,
     mass_ratio,
     # Other model parameters
-    epochs,
-    epoch_duration,
-    cadences_per_day,
+    #epochs,
+    #epoch_duration,
+    #cadences_per_day,
     epoch_distance,
     supersampling_factor,
     occult_small_threshold,
@@ -320,7 +335,6 @@ def pandora(
 ):
 
     # Make sure to work with floats. Large values as ints would overflow.
-    print(time)
     R_star = float(R_star)
     per_bary = float(per_bary)
     a_bary = float(a_bary)
@@ -343,16 +357,7 @@ def pandora(
         G * (M_planet + mass_ratio * M_planet) / (2 * pi / (per_moon * day)) ** 2
     ) ** (1 / 3)
     a_moon /= R_star
-    """
-    time = timegrid(
-        t0_bary, 
-        epochs, 
-        epoch_duration, 
-        cadences_per_day, 
-        epoch_distance, 
-        supersampling_factor
-    )
-    """
+
     x_bary = x_bary_grid(
         time, 
         a_bary, 
@@ -447,6 +452,6 @@ def pandora(
         flux_planet = resample(flux_planet, supersampling_factor)
         flux_moon = resample(flux_moon, supersampling_factor)
         flux_total = resample(flux_total, supersampling_factor)
-        time = resample(time, supersampling_factor)
+        #time = resample(time, supersampling_factor)
 
-    return flux_planet, flux_moon, flux_total, xp, yp, xm, ym, time
+    return flux_planet, flux_moon, flux_total, xp, yp, xm, ym

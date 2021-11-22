@@ -39,6 +39,7 @@ params.supersampling_factor = 1  # [int]
 params.occult_small_threshold = 0.1  # [0..1]
 params.hill_sphere_threshold = 1.2
 
+"""
 from core import timegrid
 tg = timegrid(
     params.t0_bary, 
@@ -48,11 +49,14 @@ tg = timegrid(
     params.epoch_distance, 
     params.supersampling_factor
     )
+"""
 
+time = pandora.time(params).grid()
 
 model = pandora.moon_model(params)
-time, flux_total, flux_planet, flux_moon = model.light_curve()
-time_arrays, xp, yp, xm, ym = model.coordinates()
+
+flux_total, flux_planet, flux_moon = model.light_curve(time)
+xp, yp, xm, ym = model.coordinates(time)
 print(np.sum(flux_total))
 assert np.abs(np.sum(flux_total) - 446.3670858674481) < 1e-10
 print(np.sum(time))
