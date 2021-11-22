@@ -109,6 +109,7 @@ class moon_model(object):
 
     def video(
         self,
+        time,
         limb_darkening=True,
         teff=6000,
         planet_color="black",
@@ -122,8 +123,7 @@ class moon_model(object):
             self.px,
             self.py,
             self.mx,
-            self.my,
-            self.time_arrays,
+            self.my
         ) = pandora(
             self.u1,
             self.u2,
@@ -156,7 +156,7 @@ class moon_model(object):
             self.occult_small_threshold,
             self.hill_sphere_threshold,
             self.numerical_grid,
-            self.time
+            time
         )
         # Build video with matplotlib
         fig = plt.figure(figsize=(5, 5))
@@ -298,7 +298,7 @@ class moon_model(object):
         return px, py, mx, my
 
 
-#@jit(cache=False, nopython=True, fastmath=True, parallel=False)
+@jit(cache=False, nopython=True, fastmath=True, parallel=False)
 def pandora(
     u1,
     u2,
@@ -452,6 +452,5 @@ def pandora(
         flux_planet = resample(flux_planet, supersampling_factor)
         flux_moon = resample(flux_moon, supersampling_factor)
         flux_total = resample(flux_total, supersampling_factor)
-        #time = resample(time, supersampling_factor)
 
     return flux_planet, flux_moon, flux_total, xp, yp, xm, ym

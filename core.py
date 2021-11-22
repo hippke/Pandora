@@ -496,7 +496,7 @@ def ld_convert(q1, q2):
     return u1, u2
 
 
-
+@jit(nopython=True, fastmath=True)
 def timegrid(t0_bary, epochs, epoch_duration, cadences_per_day, epoch_distance, supersampling_factor):
     # epoch_distance is the fixed constant distance between subsequent data epochs
     # Should be identical to the initial guess of the planetary period
@@ -528,6 +528,7 @@ def timegrid(t0_bary, epochs, epoch_duration, cadences_per_day, epoch_distance, 
     return time.ravel()
 
 
+@jit(nopython=True, fastmath=True)
 def x_bary_grid(time, a_bary, per_bary, t0_bary, t0_bary_offset, epoch_distance, ecc_bary, w_bary):
     # Planetary transit duration at b=0 equals the width of the star
     # Formally correct would be: (R_star+r_planet) for the transit duration T1-T4

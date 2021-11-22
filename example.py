@@ -39,20 +39,10 @@ params.supersampling_factor = 1  # [int]
 params.occult_small_threshold = 0.1  # [0..1]
 params.hill_sphere_threshold = 1.2
 
-"""
-from core import timegrid
-tg = timegrid(
-    params.t0_bary, 
-    params.epochs, 
-    params.epoch_duration, 
-    params.cadences_per_day, 
-    params.epoch_distance, 
-    params.supersampling_factor
-    )
-"""
+
+
 
 time = pandora.time(params).grid()
-
 model = pandora.moon_model(params)
 
 flux_total, flux_planet, flux_moon = model.light_curve(time)
@@ -69,6 +59,7 @@ noise_level = 100e-6  # Gaussian noise to be added to the generated data
 noise = np.random.normal(0, noise_level, len(time))
 testdata = noise + flux_total
 yerr = np.full(len(testdata), noise_level)
+print("std", np.std(noise))
 #np.savetxt("output_v4.csv", np.transpose(np.array((time, testdata))), fmt='%8f')
 
 
@@ -80,8 +71,10 @@ plt.scatter(time, testdata, color="black", s=0.5)
 plt.xlabel("Time (days)")
 plt.ylabel("Relative flux")
 plt.show()
-"""
+
+
 video = model.video(
+    time=time,
     limb_darkening=True, 
     teff=3200,
     planet_color="black",
@@ -89,4 +82,3 @@ video = model.video(
     ld_circles=100
 )
 video.save(filename="video.mp4", fps=25, dpi=200)
-"""
