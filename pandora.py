@@ -21,7 +21,7 @@ class model_params(object):
         self.r_planet = None
         self.b_bary = None
         self.w_bary = 0
-        self.ecc_bary = 90
+        self.ecc_bary = 0
         self.t0_bary = None
         self.t0_bary_offset = None
         self.M_planet = None
@@ -382,7 +382,7 @@ def pandora(
     # Check physical plausibility of a_moon
     # Should be inside [Roche lobe, Hill sphere] plus/minus some user-set margin
     M_star = ((4 * pi ** 2 / G) * ((a_bary * R_star) ** 3)) / (per_bary * day) ** 2
-    r_hill = (a_bary) * (M_planet / (3 * M_star)) ** (1 / 3)
+    r_hill = a_bary * (M_planet / (3 * M_star)) ** (1 / 3)
     r_hill_fraction = a_moon / r_hill
     if r_hill_fraction > hill_sphere_threshold:
         unphysical = True
