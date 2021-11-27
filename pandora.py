@@ -370,14 +370,9 @@ def pandora(
     )
 
     # Select segment in x_bary array close enough to star so that ellipse CAN transit
-    # If the threshold is too generous, it only costs compute.
-    # it was too tight with semimajor + 3rp + tdur
-    # If the threshold is too tight, it will make the result totally wrong
-    # one semimajor axis + half one for bary wobble + transit dur + 2r planet
-    # Maximum: A binary system mass_ratio = 1; from numerical experiments 3*a is OK
-    transit_threshold_x = 3 * a_moon + 2 * r_planet + 2 * r_moon
-    if transit_threshold_x < 2:
-        transit_threshold_x = 2
+    # If no transit is possible, we won't calculate one
+    # Maximum occurs for i=90 (edge on), e_moon=1, Omega_moon=0
+    transit_threshold_x = (1 + a_moon + r_moon) * (1 + ecc_moon)
 
     # Check physical plausibility of a_moon
     # Should be inside [Roche lobe, Hill sphere] plus/minus some user-set margin
@@ -389,9 +384,10 @@ def pandora(
     else:
         unphysical = False
 
-    # Roche
-    roche_constant = 1.25992
-    roche_limit = roche_constant * r_planet ** (1 / 3)
+    # Roche - do not use, because we don't know densities of planet and moon
+    # Instead of taking guesses, we just demand a_moon > (R_planet + R_moon)
+    if a_moon < (r_planet + r_moon):
+        unphysical = True
 
     # Unphysical moon orbit: Keep planet, but put moon at far out of transit position
     if unphysical:
@@ -431,6 +427,8 @@ def pandora(
             )
 
     # Distances of planet and moon from (0,0) = center of star
+    # Not sufficient to only calculate z in ellipse func: 
+    # We also need full coordinates to determine mutual eclipses below
     z_planet = sqrt(xp ** 2 + yp ** 2)
     z_moon = sqrt(xm ** 2 + ym ** 2)
 

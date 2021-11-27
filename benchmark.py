@@ -133,4 +133,6 @@ t1 = time.perf_counter()
 for idx in range(n):
     flux_total, flux_planet, flux_moon = model.light_curve(t)
 t2 = time.perf_counter()
+print(np.abs(np.sum(flux_total)))
+assert np.abs(np.sum(flux_total)) - 477.71053987639004 < 1e-10
 print('{:.0f}'.format(n/(t2-t1)), "Full models per second")
