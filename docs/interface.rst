@@ -114,6 +114,13 @@ Returns:
 
 :time: (*array*) Timestamps of the model
 
+Example:
+
+::
+
+   model = pandora.moon_model(params)
+   time = pandora.time(params).grid()
+
 
 
 Evaluate model and obtain lightcurve
@@ -136,7 +143,7 @@ Example:
 ::
 
    model = pandora.moon_model(params)
-   time, flux_total, flux_planet, flux_moon = model.light_curve(time)
+   flux_total, flux_planet, flux_moon = model.light_curve(time)
 
 
 Evaluate model and obtain positions
@@ -160,7 +167,7 @@ Example:
 ::
 
    model = pandora.moon_model(params)
-   time, px_bary, py_bary, mx_bary, my_bary = model.coordinates(time)
+   px_bary, py_bary, mx_bary, my_bary = model.coordinates(time)
 
 
 Evaluate model and obtain transit video
