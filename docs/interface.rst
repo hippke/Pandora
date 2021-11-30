@@ -101,6 +101,21 @@ Example:
 
 
 
+Get time grid
+-------------
+
+For a model comparison, the time series from the real data should be used. For a pure model, Pandora can create a suitable time grid:
+
+.. class:: model_params(params)
+
+Returns:
+
+.. _returnvalues:
+
+:time: (*array*) Timestamps of the model
+
+
+
 Evaluate model and obtain lightcurve
 ------------------------------------
 
@@ -112,7 +127,6 @@ Returns:
 
 .. _returnvalues:
 
-:time: (*array*) Timestamps of the model
 :flux_total: (*array*) Lightcurve of planet and moon model
 :flux_planet: (*array*) Only contributions by the planet
 :flux_moon: (*array*)  Only contributions by the moon
@@ -122,13 +136,13 @@ Example:
 ::
 
    model = pandora.moon_model(params)
-   time, flux_total, flux_planet, flux_moon = model.light_curve()
+   time, flux_total, flux_planet, flux_moon = model.light_curve(time)
 
 
 Evaluate model and obtain positions
 -----------------------------------
 
-.. class:: model.coordinates()
+.. class:: model.coordinates(time)
 
 Parameters: None
 
@@ -136,7 +150,6 @@ Parameters: None
 
 Returns:
 
-:time: (*array*) Timestamps of the model
 :px: (*array*) Planet X position at each timestamp
 :py: (*array*)  Planet Y position at each timestamp
 :mx: (*array*) Moon X position at each timestamp
@@ -147,13 +160,13 @@ Example:
 ::
 
    model = pandora.moon_model(params)
-   time, px_bary, py_bary, mx_bary, my_bary = model.coordinates()
+   time, px_bary, py_bary, mx_bary, my_bary = model.coordinates(time)
 
 
 Evaluate model and obtain transit video
 ---------------------------------------
 
-.. class:: model.video()
+.. class:: model.video(time)
 
 
 Parameters:
