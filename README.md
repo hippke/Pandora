@@ -22,8 +22,9 @@ import pandora
 params = pandora.model_params()
 params.per_bary = 365.25  # [days] 169.7
 # (...) See tutorials for list of parameters
+time = pandora.time(params).grid()
 model = pandora.moon_model(params)
-time, flux_total, flux_planet, flux_moon = model.light_curve()
+flux_total, flux_planet, flux_moon = model.light_curve(time)
 
 plt.plot(time, flux_planet, color="blue")
 plt.plot(time, flux_moon, color="red")
@@ -37,6 +38,7 @@ With Pandora, you can create transit videos to understand, teach, and explore ex
 
 ```
 video = model.video(
+    time=time
     limb_darkening=True, 
     teff=3200,
     planet_color="black",
