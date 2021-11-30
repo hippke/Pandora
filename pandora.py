@@ -1,11 +1,11 @@
 import numpy as np
 from numpy import sqrt, pi, arcsin, cos
-from numba import jit
+from numba import jit, prange, config
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from core import eclipse, ellipse, ellipse_ecc, occult, occult_small, resample, timegrid, x_bary_grid
-
+config.THREADING_LAYER = 'omp'
 
 class model_params(object):
     def __init__(self):
@@ -385,7 +385,7 @@ def pandora(
         unphysical = False
 
     # Roche - do not use, because we don't know densities of planet and moon
-    # Instead of taking guesses, we just demand a_moon > (R_planet + R_moon)
+    # Instead of taking density guesses, we just demand a_moon > (R_planet + R_moon)
     if a_moon < (r_planet + r_moon):
         unphysical = True
 
@@ -396,7 +396,6 @@ def pandora(
         yp = np.full(len(x_bary), b_bary)
         xm = np.full(len(x_bary), bignum)
         ym = xm.copy()
-        z_moon = sqrt(xm ** 2 + ym ** 2)
     else:  # valid, physical system
         if ecc_moon == 0:
             xm, ym, xp, yp = ellipse(
@@ -430,7 +429,10 @@ def pandora(
     # Not sufficient to only calculate z in ellipse func: 
     # We also need full coordinates to determine mutual eclipses below
     z_planet = sqrt(xp ** 2 + yp ** 2)
-    z_moon = sqrt(xm ** 2 + ym ** 2)
+    if unphysical:
+        z_moon = xm.copy()
+    else:
+        z_moon = sqrt(xm ** 2 + ym ** 2)
 
     # Always use precise Mandel-Agol occultation model for planet
     flux_planet = occult(zs=z_planet, u1=u1, u2=u2, k=r_planet)
@@ -442,7 +444,8 @@ def pandora(
         flux_moon = occult(zs=z_moon, k=r_moon, u1=u1, u2=u2)
 
     # Mutual planet-moon occultations
-    flux_moon = eclipse(xp, yp, xm, ym, r_planet, r_moon, flux_moon, numerical_grid)
+    if not unphysical:
+        flux_moon = eclipse(xp, yp, xm, ym, r_planet, r_moon, flux_moon, numerical_grid)
     flux_total = 1 - ((1 - flux_planet) + (1 - flux_moon))
 
     # Supersampling downconversion
@@ -452,3 +455,78 @@ def pandora(
         flux_total = resample(flux_total, supersampling_factor)
 
     return flux_planet, flux_moon, flux_total, xp, yp, xm, ym
+
+
+@jit(cache=False, nopython=True, fastmath=True, parallel=True)
+def pandora_vector(
+    u1,
+    u2,
+    R_star,
+    # Planet parameters
+    per_bary,
+    a_bary,
+    r_planet,
+    b_bary,
+    w_bary,
+    ecc_bary,
+    t0_bary,
+    t0_bary_offset,
+    M_planet,
+    # Moon parameters
+    r_moon,
+    per_moon,
+    tau_moon,
+    Omega_moon,
+    i_moon,
+    ecc_moon,
+    w_moon,
+    mass_ratio,
+    # Other model parameters
+    epoch_distance,
+    supersampling_factor,
+    occult_small_threshold,
+    hill_sphere_threshold,
+    numerical_grid,
+    time
+    ):
+
+    fluxes_total = np.empty(shape=(len(R_star), len(time)))  # np.empty(len(R_star))
+    # Multi-core vector version to obtain multiple model evaluations at once
+    for idx in prange(len(R_star)):
+        #print(idx)
+        flux_planet, flux_moon, fluxes_total[idx], xp, yp, xm, ym = pandora(
+            u1=u1,
+            u2=u1,
+            R_star=R_star[idx],
+            # Planet parameters
+            per_bary=per_bary[idx],
+            a_bary=a_bary[idx],
+            r_planet=r_planet[idx],
+            b_bary=b_bary[idx],
+            w_bary=w_bary,
+            ecc_bary=ecc_bary,
+            t0_bary=t0_bary,
+            t0_bary_offset=t0_bary_offset[idx],
+            M_planet=M_planet[idx],
+            # Moon parameters
+            r_moon=r_moon[idx],
+            per_moon=per_moon[idx],
+            tau_moon=tau_moon[idx],
+            Omega_moon=Omega_moon[idx],
+            i_moon=i_moon[idx],
+            ecc_moon=ecc_moon,
+            w_moon=w_moon,
+            mass_ratio=mass_ratio[idx],
+            # Other model parameters
+            epoch_distance=epoch_distance,
+            supersampling_factor=supersampling_factor,
+            occult_small_threshold=occult_small_threshold,
+            hill_sphere_threshold=hill_sphere_threshold,
+            numerical_grid=numerical_grid,
+            time=time
+            )
+        #print(f)
+    return fluxes_total
+
+
+

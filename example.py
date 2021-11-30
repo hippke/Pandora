@@ -72,7 +72,6 @@ plt.xlabel("Time (days)")
 plt.ylabel("Relative flux")
 plt.show()
 
-"""
 video = model.video(
     time=time,
     limb_darkening=True, 
@@ -82,4 +81,4 @@ video = model.video(
     ld_circles=100
 )
 video.save(filename="video.mp4", fps=25, dpi=200)
-"""
+
