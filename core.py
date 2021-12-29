@@ -2,6 +2,14 @@ import numpy as np
 from numpy import sqrt, pi, sin, cos, arcsin, arccos, abs, log, tan, arctan, ceil, fliplr, flipud
 from numba import jit
 
+# IDEAS:
+# cci hardcode r1=1
+# only one cci: merge funcs
+# in occult_small: move line to inner loop? m = sqrt(1 - min(b[j] ** 2, 1))
+# cache trigo funcs
+# cache ellec, ellek
+
+
 
 @jit(nopython=True, fastmath=True)
 def cci(r1, r2, d):
@@ -38,6 +46,16 @@ def occult_small(zs, k, u1, u2):
 
 
 @jit(nopython=True, fastmath=True)
+def occult_small_single_value(z, k, u1, u2):
+    s = 2 * pi * 1 / 12 * (-2 * u1 - u2 + 6)
+    m = sqrt(1 - min(z ** 2, 1))
+    limb_darkening = 1 - u1 * (1 - m) - u2 * (1 - m) ** 2
+    area = cci(1, k, z)
+    return (s - limb_darkening * area) * (1 / s)
+
+
+
+@jit(nopython=True, fastmath=True)
 def ellpicb(n, k):
 
     """The complete elliptical integral of the third kind
@@ -49,7 +67,7 @@ def ellpicb(n, k):
     which is translated from J. Eastman's IDL routine
     in EXOFAST (Eastman et al. 2013, PASP 125, 83)"""
     HALF_PI = 0.5 * pi
-    e = kc = sqrt(1 - k ** 2)
+    kc = sqrt(1 - k ** 2)
     e = kc
     p = sqrt(n + 1)
     m0 = 1
@@ -135,35 +153,25 @@ def occult(zs, k, u1, u2):
 
     INV_PI = 1 / pi
     k2 = k ** 2
-    lzs = len(zs)
-    flux = np.empty(lzs)
-    le = np.empty(lzs)
-    ld = np.empty(lzs)
-    ed = np.empty(lzs)
+    flux = np.empty(len(zs))
     omega = 1 / (1 - u1 / 3 - u2 / 6)
     c1 = 1 - u1 - 2 * u2
     c2 = u1 + 2 * u2
 
-    for i in range(lzs):
+    for i in range(len(zs)):
         z = zs[i]
 
         if abs(z - k) < 1e-6:
             z += 1e-6
 
-        # The source is unocculted
+        # Source is unocculted
         if z > 1 + k or z < 0:
             flux[i] = 1
-            le[i] = 0
-            ld[i] = 0
-            ed[i] = 0
             continue
 
-        # The source is completely occulted
+        # Source is completely occulted
         elif k >= 1 and z <= k - 1:
             flux[i] = 0
-            le[i] = 1
-            ld[i] = 1
-            ed[i] = 1
             continue
 
         z2 = z ** 2
@@ -171,50 +179,47 @@ def occult(zs, k, u1, u2):
         x2 = (k + z) ** 2
         x3 = k ** 2 - z2
 
-        # Eq. 26: Star partially occulted and the occulting object crosses the limb
+        # Star partially occulted and the occulting object crosses the limb
         if z >= abs(1 - k) and z <= 1 + k:
             kap1 = arccos(min((1 - k2 + z2) / (2 * z), 1))
             kap0 = arccos(min((k2 + z2 - 1) / (2 * k * z), 1))
-            le[i] = k2 * kap0 + kap1
-            le[i] = (le[i] - 0.5 * sqrt(max(4 * z2 - (1 + z2 - k2) ** 2, 0))) * INV_PI
+            lex = k2 * kap0 + kap1
+            lex = (lex - 0.5 * sqrt(max(4 * z2 - (1 + z2 - k2) ** 2, 0))) * INV_PI
 
         # Occulting object transits the source star (but doesn't completely cover it):
         if z <= 1 - k:
-            le[i] = k2
+            lex = k2
 
         # Edge of occulting body lies at the origin: special expressions in this case:
-        if abs(z - k) < 1e-4 * (z + k):
-            # ! Table 3, Case V.:
+        if abs(z - k) < 1e-4 * (z + k):  # Case V:
             if k == 0.5:
-                ld[i] = 1 / 3 - 4 * INV_PI / 9
-                ed[i] = 3 / 32
+                ldx = 1 / 3 - 4 * INV_PI / 9
+                edx = 3 / 32
             elif z > 0.5:
-                ld[i] = (
+                ldx = (
                     1 / 3
                     + 16 * k / 9 * INV_PI * (2 * k2 - 1) * ellec(0.5 / k)
                     - (32 * k ** 4 - 20 * k2 + 3) / 9 * INV_PI / k * ellk(0.5 / k)
                 )
                 dist = sqrt((1 - x1) * (x2 - 1))
-                ed[i] = (
+                edx = (
                     1
                     / 2
                     * INV_PI
                     * (kap1 + k2 * (k2 + 2 * z2) * kap0 - (1 + 5 * k2 + z2) / 4 * dist)
                 )
-            elif z < 0.5:
-                # ! Table 3, Case VI.:
-                ld[i] = 1 / 3 + 2 / 9 * INV_PI * (
+            elif z < 0.5:  # Case VI:
+                ldx = 1 / 3 + 2 / 9 * INV_PI * (
                     4 * (2 * k2 - 1) * ellec(2 * k) + (1 - 4 * k2) * ellk(2 * k)
                 )
-                ed[i] = k2 / 2 * (k2 + 2 * z2)
+                edx = k2 / 2 * (k2 + 2 * z2)
 
-        # Occulting body partly occults the source and crosses the limb:
-        # Table 3, Case III:
+        # Occulting body partly occults source and crosses the limb: Case III:
         if (z > 0.5 + abs(k - 0.5) and z < 1 + k) or (
             k > 0.5 and z > abs(1 - k) and z < k
         ):
             q = sqrt((1 - (k - z) ** 2) / 4 / z / k)
-            ld[i] = (
+            ldx = (
                 1
                 / 9
                 * INV_PI
@@ -226,8 +231,8 @@ def occult(zs, k, u1, u2):
                 )
             )
             if z < k:
-                ld[i] = ld[i] + 2 / 3
-            ed[i] = (
+                ldx = ldx + 2 / 3
+            edx = (
                 1
                 / 2
                 * INV_PI
@@ -238,11 +243,10 @@ def occult(zs, k, u1, u2):
                 )
             )
 
-        # Occulting body transits the source:
-        # Table 3, Case IV.:
+        # Occulting body transits the source: Table 3, Case IV:
         if k <= 1 and z < (1 - k):
-            q = sqrt((x2 - x1) / (1 - x1))  # re-calc because different condition
-            ld[i] = (
+            q = sqrt((x2 - x1) / (1 - x1))
+            ldx = (
                 2
                 / 9
                 * INV_PI
@@ -254,14 +258,157 @@ def occult(zs, k, u1, u2):
                 )
             )
             if z < k:
-                ld[i] = ld[i] + 2 / 3
+                ldx = ldx + 2 / 3
             if abs(k + z - 1) < 1e-4:
-                ld[i] = 2 / 3 * INV_PI * arccos(1 - 2 * k) - 4 / 9 * INV_PI * sqrt(
+                ldx = 2 / 3 * INV_PI * arccos(1 - 2 * k) - 4 / 9 * INV_PI * sqrt(
                     k * (1 - k)
                 ) * (3 + 2 * k - 8 * k2)
-            ed[i] = k2 / 2 * (k2 + 2 * z2)
+            edx = k2 / 2 * (k2 + 2 * z2)
 
-        flux[i] = 1 - (c1 * le[i] + c2 * ld[i] + u2 * ed[i]) * omega
+        flux[i] = 1 - (c1 * lex + c2 * ldx + u2 * edx) * omega
+    return flux
+
+
+@jit(nopython=True, fastmath=True)
+def occult_approxi(zs, k, u1, u2):
+    """Evaluates the transit model for an array of normalized distances.
+    Parameters
+    ----------
+    z: 1D array
+        Normalized distances
+    k: float
+        Planet-star radius ratio
+    u1, u2: float
+        Limb darkening coefficients
+    Returns
+    -------
+    Transit model evaluated at `z`.
+    """
+    if abs(k - 0.5) < 1e-4:
+        k = 0.5
+
+    interpolation_flux_1 = 0
+    interpolation_flux_2 = 0
+
+    INV_PI = 1 / pi
+    k2 = k ** 2
+    flux = np.empty(len(zs))
+    omega = 1 / (1 - u1 / 3 - u2 / 6)
+    c1 = 1 - u1 - 2 * u2
+    c2 = u1 + 2 * u2
+
+    for i in range(-2, len(zs)):
+
+        # Linear interpolation method: First two values are to interpolate
+        if (i == -2):
+            z = 0
+        elif (i == -1):
+            z = 0.65
+        else:
+            z = zs[i]
+
+        if abs(z - k) < 1e-6:
+            z += 1e-6
+
+        # Source is unocculted
+        if z > 1 + k or z < 0:
+            flux[i] = 1
+            continue
+
+        z2 = z ** 2
+        x1 = (k - z) ** 2
+        x2 = (k + z) ** 2
+        x3 = k ** 2 - z2
+
+        # Star partially occulted and the occulting object crosses the limb
+        if z >= abs(1 - k) and z <= 1 + k:
+            kap1 = arccos(min((1 - k2 + z2) / (2 * z), 1))
+            kap0 = arccos(min((k2 + z2 - 1) / (2 * k * z), 1))
+            lex = k2 * kap0 + kap1
+            lex = (lex - 0.5 * sqrt(max(4 * z2 - (1 + z2 - k2) ** 2, 0))) * INV_PI
+
+        # Occulting object transits the source star (but doesn't completely cover it):
+        if z <= 1 - k:
+            lex = k2
+
+        # Occulting body partly occults source and crosses the limb: Case III:
+        if (z > 0.5 + abs(k - 0.5) and z < 1 + k) or (
+            k > 0.5 and z > abs(1 - k) and z < k
+        ):
+            q = sqrt((1 - (k - z) ** 2) / 4 / z / k)
+            ldx = (
+                1
+                / 9
+                * INV_PI
+                / sqrt(k * z)
+                * (
+                    ((1 - x2) * (2 * x2 + x1 - 3) - 3 * x3 * (x2 - 2)) * ellk(q)
+                    + 4 * k * z * (z2 + 7 * k2 - 4) * ellec(q)
+                    - 3 * x3 / x1 * ellpicb((1 / x1 - 1), q)
+                )
+            )
+            if z < k:
+                ldx = ldx + 2 / 3
+            edx = (
+                1
+                / 2
+                * INV_PI
+                * (
+                    kap1
+                    + k2 * (k2 + 2 * z2) * kap0
+                    - (1 + 5 * k2 + z2) / 4 * sqrt((1 - x1) * (x2 - 1))
+                )
+            )
+
+
+        # Use interpolation method
+        if (
+            (i >= 0 and k <= 0.05 and z <= 0.65)
+            or (i >= 0 and k <= 0.04 and z <= 0.70)
+            or (i >= 0 and k <= 0.03 and z <= 0.80)
+            or (i >= 0 and k <= 0.02 and z <= 0.95)
+            or (i >= 0 and k <= 0.01 and z <= 0.98)
+        ):
+            # Perform linear interpolation correction
+            #print(i, interpolation_flux_1, interpolation_flux_2)
+            flux[i] = occult_small_single_value(z, k, u1, u2) + interpolation_flux_1 + z * interpolation_flux_2
+
+
+            continue
+
+        # Occulting body transits the source: Table 3, Case IV:
+        if z < (1 - k):
+            #print(i, k, z)
+            q = sqrt((x2 - x1) / (1 - x1))
+            ldx = (
+                2
+                / 9
+                * INV_PI
+                / sqrt(1 - x1)
+                * (
+                    (1 - 5 * z2 + k2 + x3 * x3) * ellk(q)
+                    + (1 - x1) * (z2 + 7 * k2 - 4) * ellec(q)
+                    - 3 * x3 / x1 * ellpicb((x2 / x1 - 1), q)
+                )
+            )
+            if z < k:
+                ldx = ldx + 2 / 3
+            if abs(k + z - 1) < 1e-4:
+                ldx = 2 / 3 * INV_PI * arccos(1 - 2 * k) - 4 / 9 * INV_PI * sqrt(
+                    k * (1 - k)
+                ) * (3 + 2 * k - 8 * k2)
+            edx = k2 / 2 * (k2 + 2 * z2)
+
+        current_flux = 1 - (c1 * lex + c2 * ldx + u2 * edx) * omega
+
+        # Linear interpolation method: First two values are to interpolate
+        if (i == -2):
+            interpolation_flux_1 = current_flux - occult_small_single_value(z, k, u1, u2)
+        elif (i == -1):
+            interpolation_flux_2 = current_flux - occult_small_single_value(z, k, u1, u2)
+        else:
+            flux[i] = current_flux
+
     return flux
 
 
@@ -270,6 +417,9 @@ def ellipse(
     a, per, tau, Omega, i, time, transit_threshold_x, x_bary, mass_ratio, b_bary
 ):
     """2D x-y Kepler solver without eccentricity"""
+
+    # Debugging, remove later:
+    #transit_threshold_x = 1000.0
 
     bignum = 1.0e8  # a float for px = out of transit (no np.inf in numba)
     l = len(time)
@@ -281,12 +431,18 @@ def ellipse(
     yp = xm.copy()
     a_planet = (a * mass_ratio) / (1 + mass_ratio)
     a_moon = a - a_planet
-
     for idx in range(l):
         if abs(x_bary[idx]) < transit_threshold_x:
-            k = tan((pi * (time[idx] - tau * per) / per))
-            cos_Q = (1 - k ** 2) / (1 + k ** 2)
-            sin_Q = (2 * k) / ((1 + k ** 2))
+            k = (pi * (time[idx] - tau * per) / per)
+
+            # Standard Version #1
+            #cos_Q = cos(2 * k)
+            #sin_Q = sin(2 * k)
+
+            # Alternative Version #2: Swap sin and cos for one tan:
+            h = tan(k)
+            cos_Q = (1 - h ** 2) / (1 + h ** 2)
+            sin_Q = (2 * h) / ((1 + h ** 2))
             vector_x = cos(O) * cos_Q - sin(O) * sin_Q * cos(i)
             vector_y = sin(O) * cos_Q + cos(O) * sin_Q * cos(i)
             xm[idx] = +vector_x * a_moon + x_bary[idx]
@@ -550,6 +706,7 @@ def x_bary_grid(time, a_bary, per_bary, t0_bary, t0_bary_offset, epoch_distance,
         stop=t0_bary + epoch_distance * epochs,
         step=epoch_distance,
     )
+    #print("ti_epoch_midtimes original", ti_epoch_midtimes)
     x_bary = np.empty(len(time))
     for idx in range(len(time)):
         epoch = int((time[idx] - t0_bary) / per_bary + 0.5)
@@ -562,3 +719,60 @@ def x_bary_grid(time, a_bary, per_bary, t0_bary, t0_bary_offset, epoch_distance,
         time_from_nearest_midtransit = 2 * (time[idx] - ti_epoch_midtimes[epoch])
         x_bary[idx] = time_from_nearest_midtransit / tdur - t0_shift_planet - per_shift_planet
     return x_bary
+
+
+
+@jit(nopython=True, fastmath=True)
+# Identical output to x_bary_grid but without np.arange (=slightly faster, but uglier)
+def x_bary_grid_plain(
+    time, a_bary, per_bary, t0_bary, t0_bary_offset, epoch_distance, ecc_bary, w_bary
+):
+    tdur = per_bary / pi * arcsin(1 / a_bary)
+    
+    if ecc_bary > 0:
+        tdur /= 1 / sqrt(1 - ecc_bary ** 2) * (1 + ecc_bary * cos(w_bary / 180 * pi))
+    t0_shift_planet = t0_bary_offset / (tdur / 2)
+    x_bary = np.empty(len(time))
+    #print("tdur", tdur)
+    for idx in range(len(time)):
+        epoch = int((time[idx] - t0_bary) / per_bary + 0.5)
+        #print("t0_shift_planet", t0_shift_planet)
+        #print("epoch_distance", epoch_distance)
+        x_bary[idx] = (
+            (2 * (time[idx] - (t0_bary + epoch_distance * epoch))) / tdur
+            - t0_shift_planet
+            - (((per_bary - epoch_distance) * epoch) / (tdur / 2))
+        )
+    return x_bary
+
+
+@jit(nopython=True, fastmath=True)
+def x_bary_grid_array(
+    time, a_bary, per_bary, t0_bary, t0_bary_offset, epoch_distance, ecc_bary, w_bary
+):
+    # epoch_distance: float (fixed for all models)
+    # t0_bary:        float (fixed for all models)
+
+    # time: 1d array (same for all models)
+
+    # a_bary, per_bary, t0_bary_offset, ecc_bary, w_bary : 1d arrays
+
+    # x_bary: 2d array (models, x_bary)
+    x_bary = np.empty(shape=(len(a_bary), len(time)))
+
+    for model_idx in range(len(a_bary)):
+
+        tdur = per_bary[model_idx] / pi * arcsin(1 / a_bary[model_idx])
+        if ecc_bary[model_idx] > 0:
+            tdur /= 1 / sqrt(1 - ecc_bary[model_idx] ** 2) * (1 + ecc_bary[model_idx] * cos(w_bary[model_idx] / 180 * pi))
+        t0_shift_planet = t0_bary_offset[model_idx] / (tdur / 2)
+        
+        for time_idx in range(len(time)):
+            epoch = int((time[time_idx] - t0_bary) / per_bary[model_idx] + 0.5)
+            x_bary[model_idx,time_idx] = (
+                (2 * (time[time_idx] - (t0_bary + epoch_distance * epoch))) / tdur
+                - t0_shift_planet
+                - (((per_bary[model_idx] - epoch_distance) * epoch) / (tdur / 2))
+            )
+    return x_bary
+
