@@ -3,12 +3,79 @@ from numpy import sqrt, pi, sin, cos, arcsin, arccos, abs, log, tan, arctan, cei
 from numba import jit
 
 # IDEAS:
-# cci hardcode r1=1
+# check if eclipses possible at all (func of incl, ecc, a, omega). skip if not (6600/sec)
 # only one cci: merge funcs
-# in occult_small: move line to inner loop? m = sqrt(1 - min(b[j] ** 2, 1))
 # cache trigo funcs
 # cache ellec, ellek
+# create all arrays in advance and re-use them
+# check if correct: if unphysical: z_moon = xm.copy() <-- xm? rather .large value?
+# Bresenham algorithm to paint fast circle
+# bilinear interpolation for mandel agol cache. pre-fetch 2 curves from array
+# re-introduce special case into occult_hybrid:
+#   "Edge of occulting body lies at the origin: special expressions in this case"
 
+# DONE:
+# ALensKite and ALens are faster (25%) than CCI: swap? 
+# ==> faster if benched separately, but not when inlined
+
+# in occult_small: move line to inner loop? m = sqrt(1 - min(b[j] ** 2, 1))
+
+
+
+@jit(nopython=True, fastmath=True)
+def create_occult_cache(u1, u2, dim):
+    z_max = 1.1
+    k_min = 0.001
+    k_max = 0.1
+    zs = np.linspace(0, z_max, dim)
+    ks = np.linspace(0.001, k_max, dim)
+    fs = np.empty((dim, dim), dtype="float32")
+    for count, k in enumerate(ks):
+        fs[count] = occult(zs, k, u1, u2)
+    return (fs, ks, zs)
+
+
+@jit(nopython=True, fastmath=True)
+def read_occult_cache(zs_target, k, cache):
+    fs, ks, zs = cache
+    flux = np.ones(len(zs_target))
+    idx_k = int(np.ceil((k - ks[0]) / (ks[1] - ks[0])))
+    ratio_k = (ks[idx_k] - k) / (ks[idx_k] - ks[idx_k-1])
+    curve = fs[idx_k-1] * ratio_k + fs[idx_k] * (1 - ratio_k)
+    for idx in range(len(zs_target)):
+        if zs_target[idx] == 0:
+            idx_z = 1
+        else:
+            idx_z = int(np.ceil(zs_target[idx] / zs[1]))
+        if zs_target[idx] >= 1.1:
+            continue
+
+        ratio_z = (zs[idx_z] - zs_target[idx]) / (zs[idx_z] - zs[idx_z-1])
+        res = curve[idx_z-1] * ratio_z + curve[idx_z] * (1 - ratio_z)
+        if res > 1:
+            res = 1
+        if res < 0:
+            res = 0
+        flux[idx] = res
+    return flux
+
+
+
+
+@jit(nopython=True, fastmath=True)
+def cci_kite(r, b):
+    if (1 + r <= b):
+        return 0
+    elif abs(1 - r) < b and b <= 1 + r:
+        Akite = 0.5 * sqrt((b + (r + 1)) * (1 - (b - r)) * (1 + (b - r)) * (b + (r - 1)))
+        #Akite = 0.5 * sqrt((b - r + 1)*(-b + r + 1) * (b + r - 1) * (b + r + 1))
+        kappa0 = np.arctan2(2 * Akite, (r - 1) * (r + 1) + b * b)
+        kappa1 = np.arctan2(2 * Akite, (1 - r) * (1 + r) + b * b)
+        return kappa1 + r * r * kappa0 - Akite
+    elif b <= 1 - r:
+        return pi * r * r
+    elif b <= r - 1:
+        return pi
 
 
 @jit(nopython=True, fastmath=True)
@@ -37,10 +104,27 @@ def occult_small(zs, k, u1, u2):
     s = 2 * pi * 1 / 12 * (-2 * u1 - u2 + 6)
     s_inv = 1 / s
     for j in range(i):
-        m = sqrt(1 - min(b[j] ** 2, 1))
         if b[j] < 1 + k:
+            m = sqrt(1 - min(b[j] ** 2, 1))
             limb_darkening = 1 - u1 * (1 - m) - u2 * (1 - m) ** 2
             area = cci(1, k, b[j])
+            f[j] = (s - limb_darkening * area) * s_inv
+    return f
+
+
+@jit(nopython=True, fastmath=True)
+def occult_small_kite(zs, k, u1, u2):
+    i = zs.size
+    f = np.ones(i)
+    b = abs(zs)
+    s = 2 * pi * 1 / 12 * (-2 * u1 - u2 + 6)
+    s_inv = 1 / s
+    for j in range(i):
+        if b[j] < 1 + k:
+            m = sqrt(1 - min(b[j] ** 2, 1))
+            limb_darkening = 1 - u1 * (1 - m) - u2 * (1 - m) ** 2
+            #area = cci(1, k, b[j])
+            area = cci_kite(k, b[j])
             f[j] = (s - limb_darkening * area) * s_inv
     return f
 
@@ -101,8 +185,15 @@ def ellec(k):
     b3 = 0.040696975260
     b4 = 0.005264496390
     m1 = 1 - k * k
+    epsilon = 1e-14
+
+    # Error if 1/m == 0 in log(1/m1)
+    #print("m1", m1)
+    #if abs(1 / m1) < 1e-6:
+    #    m1 += 1e-6
+    #print("m1 fixed", m1)
     return (1 + m1 * (a1 + m1 * (a2 + m1 * (a3 + m1 * a4)))) + (
-        m1 * (b1 + m1 * (b2 + m1 * (b3 + m1 * b4))) * log(1 / m1)
+        m1 * (b1 + m1 * (b2 + m1 * (b3 + m1 * b4))) * log(1 / (m1 + epsilon))
     )
 
 
@@ -119,8 +210,9 @@ def ellk(k):
     b3 = 0.033283553460
     b4 = 0.004417870120
     m1 = 1 - k * k
+    epsilon = 1e-14
     return (a0 + m1 * (a1 + m1 * (a2 + m1 * (a3 + m1 * a4)))) - (
-        (b0 + m1 * (b1 + m1 * (b2 + m1 * (b3 + m1 * b4)))) * log(m1)
+        (b0 + m1 * (b1 + m1 * (b2 + m1 * (b3 + m1 * b4)))) * log(m1 + epsilon)
     )
 
 
@@ -129,6 +221,8 @@ def ellk(k):
 # Copyright (C) 2010-2020  Hannu Parviainen
 # Modified by Michael Hippke 2021, based on a GPL3 license
 # Modifications:
+# - Increased numerical stability for k=0.6 (exactly), see comments below
+# - Fixed an error for missing ed[i], must be >= in "if (z >= 0.5 + abs(k - 0.5)"
 # - Restricted to quadratic limb-darkening
 # - Caching a few expensive values, e.g. from sqrt
 # - Replaced some array generations with floats or copies
@@ -153,25 +247,37 @@ def occult(zs, k, u1, u2):
 
     INV_PI = 1 / pi
     k2 = k ** 2
-    flux = np.empty(len(zs))
+    lzs = len(zs)
+    epsilon = 1e-14
+    flux = np.empty(lzs)
+    le = np.empty(lzs)
+    ld = np.empty(lzs)
+    ed = np.empty(lzs)
     omega = 1 / (1 - u1 / 3 - u2 / 6)
     c1 = 1 - u1 - 2 * u2
     c2 = u1 + 2 * u2
 
-    for i in range(len(zs)):
+    for i in range(lzs):
         z = zs[i]
+
 
         if abs(z - k) < 1e-6:
             z += 1e-6
 
-        # Source is unocculted
+        # The source is unocculted
         if z > 1 + k or z < 0:
             flux[i] = 1
+            le[i] = 0
+            ld[i] = 0
+            ed[i] = 0
             continue
 
-        # Source is completely occulted
+        # The source is completely occulted
         elif k >= 1 and z <= k - 1:
             flux[i] = 0
+            le[i] = 1
+            ld[i] = 1
+            ed[i] = 1
             continue
 
         z2 = z ** 2
@@ -179,47 +285,58 @@ def occult(zs, k, u1, u2):
         x2 = (k + z) ** 2
         x3 = k ** 2 - z2
 
-        # Star partially occulted and the occulting object crosses the limb
+        # Eq. 26: Star partially occulted and the occulting object crosses the limb
         if z >= abs(1 - k) and z <= 1 + k:
-            kap1 = arccos(min((1 - k2 + z2) / (2 * z), 1))
-            kap0 = arccos(min((k2 + z2 - 1) / (2 * k * z), 1))
-            lex = k2 * kap0 + kap1
-            lex = (lex - 0.5 * sqrt(max(4 * z2 - (1 + z2 - k2) ** 2, 0))) * INV_PI
-
+            kap1 = arccos(min((1 - k2 + z2) / (2 * z + epsilon), 1))
+            kap0 = arccos(min((k2 + z2 - 1) / (2 * k * z + epsilon), 1))
+            le[i] = k2 * kap0 + kap1
+            le[i] = (le[i] - 0.5 * sqrt(max(4 * z2 - (1 + z2 - k2) ** 2, 0))) * INV_PI
+            #print("eq26", z, kap1, kap0, le[i])
         # Occulting object transits the source star (but doesn't completely cover it):
         if z <= 1 - k:
-            lex = k2
+            le[i] = k2
 
         # Edge of occulting body lies at the origin: special expressions in this case:
-        if abs(z - k) < 1e-4 * (z + k):  # Case V:
+        if abs(z - k) <= 1e-4 * (z + k):
+            #print("edge case", z, k, abs(z-k), 1e-4 * (z + k))
+            # ! Table 3, Case V.:
             if k == 0.5:
-                ldx = 1 / 3 - 4 * INV_PI / 9
-                edx = 3 / 32
+                ld[i] = 1 / 3 - 4 * INV_PI / 9
+                ed[i] = 3 / 32
             elif z > 0.5:
-                ldx = (
+                ld[i] = (
                     1 / 3
                     + 16 * k / 9 * INV_PI * (2 * k2 - 1) * ellec(0.5 / k)
                     - (32 * k ** 4 - 20 * k2 + 3) / 9 * INV_PI / k * ellk(0.5 / k)
                 )
                 dist = sqrt((1 - x1) * (x2 - 1))
-                edx = (
+                ed[i] = (
                     1
                     / 2
                     * INV_PI
                     * (kap1 + k2 * (k2 + 2 * z2) * kap0 - (1 + 5 * k2 + z2) / 4 * dist)
                 )
-            elif z < 0.5:  # Case VI:
-                ldx = 1 / 3 + 2 / 9 * INV_PI * (
+            elif z < 0.5:
+                # ! Table 3, Case VI.:
+                ld[i] = 1 / 3 + 2 / 9 * INV_PI * (
                     4 * (2 * k2 - 1) * ellec(2 * k) + (1 - 4 * k2) * ellk(2 * k)
                 )
-                edx = k2 / 2 * (k2 + 2 * z2)
+                ed[i] = k2 / 2 * (k2 + 2 * z2)
+                #print(z, ld[i], ed[i])
 
-        # Occulting body partly occults source and crosses the limb: Case III:
-        if (z > 0.5 + abs(k - 0.5) and z < 1 + k) or (
+        # Occulting body partly occults the source and crosses the limb:
+        # Table 3, Case III:
+        if (z >= 0.5 + abs(k - 0.5) and z < 1 + k) or (
             k > 0.5 and z > abs(1 - k) and z < k
         ):
             q = sqrt((1 - (k - z) ** 2) / 4 / z / k)
-            ldx = (
+
+            # Numerical stability: if k=0.06 then q is close to 1, 
+            # and then ellpicb goes to hell
+            if (q - 1) < 1e-8:
+                q -= 1e-8
+            #print("q", q)
+            ld[i] = (
                 1
                 / 9
                 * INV_PI
@@ -230,9 +347,12 @@ def occult(zs, k, u1, u2):
                     - 3 * x3 / x1 * ellpicb((1 / x1 - 1), q)
                 )
             )
+            #ld[i] = 0.000899506134059702
+
+            #print("ld[i]", ld[i], (1 / x1 - 1), q)
             if z < k:
-                ldx = ldx + 2 / 3
-            edx = (
+                ld[i] = ld[i] + 2 / 3
+            ed[i] = (
                 1
                 / 2
                 * INV_PI
@@ -242,11 +362,24 @@ def occult(zs, k, u1, u2):
                     - (1 + 5 * k2 + z2) / 4 * sqrt((1 - x1) * (x2 - 1))
                 )
             )
+            #print("ed here", ed[i])
 
-        # Occulting body transits the source: Table 3, Case IV:
+        # Occulting body transits the source:
+        # Table 3, Case IV.:
         if k <= 1 and z < (1 - k):
-            q = sqrt((x2 - x1) / (1 - x1))
-            ldx = (
+            
+            #if x1 == 0:
+            #    x1 += 
+            #print("x1, x2", x1, x2)
+            q = sqrt((x2 - x1) / (1 - x1) + 1e-8) # re-calc because different condition
+            #x3 += 1e-8
+            #x1 += 1e-9
+            #print("vals", x1, x2, z2, k2, x3, k, q)
+            #print("(x2 / x1 - 1)", (x2 / x1 - 1))
+            #x3 += epsilon
+            # x1 = 0
+            # x3 = 0
+            ld[i] = (
                 2
                 / 9
                 * INV_PI
@@ -254,23 +387,24 @@ def occult(zs, k, u1, u2):
                 * (
                     (1 - 5 * z2 + k2 + x3 * x3) * ellk(q)
                     + (1 - x1) * (z2 + 7 * k2 - 4) * ellec(q)
-                    - 3 * x3 / x1 * ellpicb((x2 / x1 - 1), q)
+                    - 3 * x3 / (x1) * ellpicb((x2 / (x1) - 1), q)
                 )
             )
             if z < k:
-                ldx = ldx + 2 / 3
+                ld[i] = ld[i] + 2 / 3
             if abs(k + z - 1) < 1e-4:
-                ldx = 2 / 3 * INV_PI * arccos(1 - 2 * k) - 4 / 9 * INV_PI * sqrt(
+                ld[i] = 2 / 3 * INV_PI * arccos(1 - 2 * k) - 4 / 9 * INV_PI * sqrt(
                     k * (1 - k)
                 ) * (3 + 2 * k - 8 * k2)
-            edx = k2 / 2 * (k2 + 2 * z2)
-
-        flux[i] = 1 - (c1 * lex + c2 * ldx + u2 * edx) * omega
+            ed[i] = k2 / 2 * (k2 + 2 * z2)
+        #print(z, c1, le[i], c2, ld[i], u2, ed[i], omega)
+        #print(z, ld[i], ed[i])
+        flux[i] = 1 - (c1 * le[i] + c2 * ld[i] + u2 * ed[i]) * omega
     return flux
 
 
 @jit(nopython=True, fastmath=True)
-def occult_approxi(zs, k, u1, u2):
+def occult_hybrid(zs, k, u1, u2):
     """Evaluates the transit model for an array of normalized distances.
     Parameters
     ----------
@@ -433,22 +567,49 @@ def ellipse(
     a_moon = a - a_planet
     for idx in range(l):
         if abs(x_bary[idx]) < transit_threshold_x:
-            k = (pi * (time[idx] - tau * per) / per)
+            k = pi * (time[idx] - tau * per) / per
 
             # Standard Version #1
-            #cos_Q = cos(2 * k)
-            #sin_Q = sin(2 * k)
+            cos_Q = cos(2 * k)
+            sin_Q = sin(2 * k)
 
             # Alternative Version #2: Swap sin and cos for one tan:
-            h = tan(k)
-            cos_Q = (1 - h ** 2) / (1 + h ** 2)
-            sin_Q = (2 * h) / ((1 + h ** 2))
+            #h = tan(k)
+            #cos_Q = (1 - h ** 2) / (1 + h ** 2)
+            #sin_Q = (2 * h) / ((1 + h ** 2))
+
             vector_x = cos(O) * cos_Q - sin(O) * sin_Q * cos(i)
             vector_y = sin(O) * cos_Q + cos(O) * sin_Q * cos(i)
             xm[idx] = +vector_x * a_moon + x_bary[idx]
             ym[idx] = +vector_y * a_moon + b_bary
             xp[idx] = -vector_x * a_planet + x_bary[idx]
             yp[idx] = -vector_y * a_planet + b_bary
+    return xm, ym, xp, yp
+
+
+@jit(nopython=True, fastmath=True)
+def ellipse_vector(
+    a, per, tau, Omega, i, time, x_bary, mass_ratio, b_bary
+):
+    """2D x-y Kepler solver without eccentricity"""
+
+    O = Omega / 180 * pi
+    i = i / 180 * pi
+    xm = np.empty(len(time))
+    ym = xm.copy()
+    xp = xm.copy()
+    yp = xm.copy()
+    a_planet = (a * mass_ratio) / (1 + mass_ratio)
+    a_moon = a - a_planet
+    k = pi * (time - tau * per) / per
+    cos_Q = cos(2 * k)
+    sin_Q = sin(2 * k)
+    vector_x = cos(O) * cos_Q - sin(O) * sin_Q * cos(i)
+    vector_y = sin(O) * cos_Q + cos(O) * sin_Q * cos(i)
+    xm = +vector_x * a_moon + x_bary
+    ym = +vector_y * a_moon + b_bary
+    xp = -vector_x * a_planet + x_bary
+    yp = -vector_y * a_planet + b_bary
     return xm, ym, xp, yp
 
 
@@ -695,7 +856,7 @@ def x_bary_grid(time, a_bary, per_bary, t0_bary, t0_bary_offset, epoch_distance,
     # Correct transit duration based on relative orbital velocity
     # of circular versus eccentric case
     if ecc_bary > 0:
-        tdur /= 1 / sqrt(1 - ecc_bary ** 2) * (1 + ecc_bary * cos(w_bary / 180 * pi))
+        tdur /= 1 / sqrt(1 - ecc_bary ** 2) * (1 + ecc_bary * cos((w_bary - 90) / 180 * pi))
 
     # t0_bary_offset in [days] ==> convert to x scale (i.e. 0.5 transit dur radius)
     t0_shift_planet = t0_bary_offset / (tdur / 2)
@@ -728,16 +889,12 @@ def x_bary_grid_plain(
     time, a_bary, per_bary, t0_bary, t0_bary_offset, epoch_distance, ecc_bary, w_bary
 ):
     tdur = per_bary / pi * arcsin(1 / a_bary)
-    
     if ecc_bary > 0:
-        tdur /= 1 / sqrt(1 - ecc_bary ** 2) * (1 + ecc_bary * cos(w_bary / 180 * pi))
+        tdur /= 1 / sqrt(1 - ecc_bary ** 2) * (1 + ecc_bary * cos((w_bary - 90) / 180 * pi))
     t0_shift_planet = t0_bary_offset / (tdur / 2)
     x_bary = np.empty(len(time))
-    #print("tdur", tdur)
     for idx in range(len(time)):
         epoch = int((time[idx] - t0_bary) / per_bary + 0.5)
-        #print("t0_shift_planet", t0_shift_planet)
-        #print("epoch_distance", epoch_distance)
         x_bary[idx] = (
             (2 * (time[idx] - (t0_bary + epoch_distance * epoch))) / tdur
             - t0_shift_planet
@@ -764,7 +921,7 @@ def x_bary_grid_array(
 
         tdur = per_bary[model_idx] / pi * arcsin(1 / a_bary[model_idx])
         if ecc_bary[model_idx] > 0:
-            tdur /= 1 / sqrt(1 - ecc_bary[model_idx] ** 2) * (1 + ecc_bary[model_idx] * cos(w_bary[model_idx] / 180 * pi))
+            tdur /= 1 / sqrt(1 - ecc_bary ** 2) * (1 + ecc_bary * cos((w_bary - 90) / 180 * pi))
         t0_shift_planet = t0_bary_offset[model_idx] / (tdur / 2)
         
         for time_idx in range(len(time)):

@@ -1,11 +1,25 @@
 import numpy as np
-from numpy import sqrt, pi, arcsin, cos
+from numpy import sqrt, pi, arcsin, cos, degrees
 from numba import jit, prange, config
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
-from core import eclipse, ellipse, ellipse_ecc, occult, occult_small, resample, timegrid, x_bary_grid
-config.THREADING_LAYER = 'omp'
+from core import (
+    eclipse,
+    ellipse,
+    ellipse_ecc,
+    ellipse_vector,
+    occult,
+    occult_small,
+    resample,
+    timegrid,
+    x_bary_grid,
+    occult_hybrid,
+    create_occult_cache,
+    read_occult_cache
+)
+#config.THREADING_LAYER = 'omp'
+
 
 class model_params(object):
     def __init__(self):
@@ -106,6 +120,11 @@ class moon_model(object):
         self.hill_sphere_threshold = params.hill_sphere_threshold
         self.numerical_grid = params.numerical_grid
         self.time = params.time
+        print("Creating occult cache for u1, u2 =", self.u1, self.u2, "...", end = "")
+        self.cache = create_occult_cache(self.u1, self.u2, dim=300)
+        print(" done")
+        print("Cache size:", self.cache[0].nbytes/1024/1024, "MB")
+
 
     def video(
         self,
@@ -222,7 +241,6 @@ class moon_model(object):
         return ani
 
 
-
     def light_curve(self, time):
         flux_planet, flux_moon, flux_total, px, py, mx, my = pandora(
             self.u1,
@@ -256,7 +274,8 @@ class moon_model(object):
             self.occult_small_threshold,
             self.hill_sphere_threshold,
             self.numerical_grid,
-            time
+            time,
+            self.cache
         )
         return flux_total, flux_planet, flux_moon
 
@@ -331,7 +350,8 @@ def pandora(
     occult_small_threshold,
     hill_sphere_threshold,
     numerical_grid,
-    time
+    time,
+    cache=None
 ):
 
     # Make sure to work with floats. Large values as ints would overflow.
@@ -349,6 +369,7 @@ def pandora(
     Omega_moon = float(Omega_moon)
     i_moon = float(i_moon)
     mass_ratio = float(mass_ratio)
+
 
     # Calculate moon period around planet
     G = 6.67408e-11
@@ -372,7 +393,7 @@ def pandora(
     # Select segment in x_bary array close enough to star so that ellipse CAN transit
     # If no transit is possible, we won't calculate one
     # Maximum occurs for i=90 (edge on), e_moon=1, Omega_moon=0
-    transit_threshold_x = (1 + a_moon + r_moon) * (1 + ecc_moon)
+    #transit_threshold_x = (1 + a_moon + r_moon) * (1 + ecc_moon)
 
     # Check physical plausibility of a_moon
     # Should be inside [Roche lobe, Hill sphere] plus/minus some user-set margin
@@ -398,14 +419,14 @@ def pandora(
         ym = xm.copy()
     else:  # valid, physical system
         if ecc_moon == 0:
-            xm, ym, xp, yp = ellipse(
+            xm, ym, xp, yp = ellipse_vector(
                 a=a_moon,
                 per=per_moon,
                 tau=tau_moon,
                 Omega=Omega_moon,
                 i=i_moon,
                 time=time,
-                transit_threshold_x=transit_threshold_x,
+                #transit_threshold_x=transit_threshold_x,
                 x_bary=x_bary,
                 mass_ratio=mass_ratio,
                 b_bary=b_bary,
@@ -434,19 +455,33 @@ def pandora(
     else:
         z_moon = sqrt(xm ** 2 + ym ** 2)
 
-    # Always use precise Mandel-Agol occultation model for planet
-    flux_planet = occult(zs=z_planet, u1=u1, u2=u2, k=r_planet)
-
+    # Cached Mandel-Agol occultation model for planet < 0.1, else hybrid
+    if cache is not None and r_planet < 0.1:
+        flux_planet = read_occult_cache(
+            zs_target=z_planet, 
+            k=r_planet, 
+            cache=cache
+        )
+    else:
+        flux_planet = occult_hybrid(zs=z_planet, u1=u1, u2=u2, k=r_planet)
+    
     # For moon transit: User can "set occult_small_threshold > 0"
     if r_moon < occult_small_threshold:
         flux_moon = occult_small(zs=z_moon, k=r_moon, u1=u1, u2=u2)
+    elif cache is not None and r_moon < 0.1:
+        flux_moon = read_occult_cache(zs_target=z_moon, k=r_moon, cache=cache)
     else:
-        flux_moon = occult(zs=z_moon, k=r_moon, u1=u1, u2=u2)
+        flux_moon = occult_hybrid(zs=z_moon, k=r_moon, u1=u1, u2=u2)
+
+    eclipses_occur = True
+    # Eclipses vanish if (90 deg is edge-on, i is in [0,90]):
+    if (90 - i_moon) > degrees(arcsin((r_planet + r_moon) / a_moon)):
+        eclipses_occur = False
 
     # Mutual planet-moon occultations
-    if not unphysical:
+    if not unphysical and eclipses_occur:
         flux_moon = eclipse(xp, yp, xm, ym, r_planet, r_moon, flux_moon, numerical_grid)
-    flux_total = 1 - ((1 - flux_planet) + (1 - flux_moon))
+    flux_total = flux_moon + flux_planet - 1
 
     # Supersampling downconversion
     if supersampling_factor > 1:
