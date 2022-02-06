@@ -53,7 +53,15 @@ Videos approximate the true lightcurve as calculated by Pandora very well. They 
 ![Video](https://github.com/hippke/Pandora/blob/main/docs/source/video_image.png?raw=true)
 
 ### Installation
-Install with `pip install pandora-moon`.
+Install with `pip install pandora-moon`. If you end up in dependency hell, set up a fresh environment:
+
+```
+conda create -n pandora_env python=3.9
+conda activate pandora_env
+conda install numpy matplotlib numba cython scipy
+pip install wotan ultranest tqdm h5py
+pip install pandora-moon
+```
 
 Attribution
 ----------------
