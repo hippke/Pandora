@@ -68,24 +68,7 @@ Attribution
 Please cite [Hippke et al. (2019, AJ, 158, 143)](https://ui.adsabs.harvard.edu/abs/2019AJ....158..143H/abstract) if you find this code useful in your research. The BibTeX entry for the paper is:
 
 ```
-@ARTICLE{2019AJ....158..143H,
-       author = {{Hippke}, Michael and {David}, Trevor J. and {Mulders}, Gijs D. and
-         {Heller}, Ren{\'e}},
-        title = "{W{\={o}}tan: Comprehensive Time-series Detrending in Python}",
-      journal = {\aj},
-     keywords = {eclipses, methods: data analysis, methods: statistical, planetary systems, planets and satellites: detection, Astrophysics - Earth and Planetary Astrophysics, Astrophysics - Instrumentation and Methods for Astrophysics},
-         year = "2019",
-        month = "Oct",
-       volume = {158},
-       number = {4},
-          eid = {143},
-        pages = {143},
-          doi = {10.3847/1538-3881/ab3984},
-archivePrefix = {arXiv},
-       eprint = {1906.00966},
- primaryClass = {astro-ph.EP},
-       adsurl = {https://ui.adsabs.harvard.edu/abs/2019AJ....158..143H},
-      adsnote = {Provided by the SAO/NASA Astrophysics Data System}
+@ARTICLE{
 }
 
 
