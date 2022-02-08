@@ -58,10 +58,17 @@ Install with `pip install pandora-moon`. If you end up in dependency hell, set u
 ```
 conda create -n pandora_env python=3.9
 conda activate pandora_env
-conda install numpy matplotlib numba cython scipy
-pip install wotan ultranest tqdm h5py
+conda install numpy matplotlib numba 
 pip install pandora-moon
 ```
+
+For sampling, the following packages will be useful:
+```
+conda install cython scipy
+pip install ultranest dynesty h5py
+```
+
+
 
 Attribution
 ----------------
