@@ -26,7 +26,7 @@ Barycenter parameters:
 :a_bary: *(float)* Semimajor axis of planet-moon barycenter [R_star]. Should be a free parameter when fitting.
 :r_planet: *(float)* Radius [R_star]. Should be a free parameter when fitting.
 :b_bary: *(float)* Impact parameter of planet-moon barycenter [0..2]. Should be a free parameter when fitting.
-:ecc_bary: *(float)* Eccentricity of barycenter [0..1]
+:ecc_bary: *(float)* Eccentricity of barycenter [0..1]. Optional. Default `0`.
 :w_bary: *(float*) Argument of periapsis of barycenter [deg]
 :t0_bary: *(float)* Time of inferior conjunction of planet-moon barycenter [days]. Should NOT be a free parameter when fitting.
 :t0_bary_offset: *(float)* Time difference to inferior conjunction of planet-moon barycenter [days]. Should be a free parameter when fitting.
