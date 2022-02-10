@@ -3,7 +3,8 @@ Python Interface
 
 This describes the Python interface of Pandora. There are actually two ways to obtain a model: A class-based and a function-based approach.
 
-- The class-based version is more "pythonic" and in line with what users know from packages like [batman](https://github.com/lkreidberg/batman), [Wotan](https://github.com/hippke/wotan), [TLS](https://github.com/hippke/TLS), and others. It offers various gimicks such as video animations of transits.
+- The class-based version is more "pythonic" and in line with what users know from packages like `batman
+<https://github.com/lkreidberg/batman>`_, [Wotan](https://github.com/hippke/wotan), [TLS](https://github.com/hippke/TLS), and others. It offers various gimicks such as video animations of transits.
 - The function-based version is simpler, procedural, but "ugly" due to passing along many parameters. Depending on the size of the model, it can be a few times faster due to the lack of class instantiation. Its main use case is for model evaluation with MCMC and nested samplers. 
 
 Both versions must yield perfectly identical results. If you find any differences, please open a bug ticket on Github.
