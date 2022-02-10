@@ -72,6 +72,7 @@ Time grid:
 Example:
 
 ::
+
    import pandoramoon as pandora
    params = pandora.model_params()
    R_sun = 696342000.0           # [m]
