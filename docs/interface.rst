@@ -60,6 +60,12 @@ Time grid:
 :cadences_per_day: (*int*) Number of exposured (cadences) per day. Should be constant.
 
 
+.. note::
+
+   There are 3 values related to planetary period: `t0_bary`, `t0_bary_offset`, and `epoch_distance`. 
+   
+
+
 Example:
 
 ::
