@@ -60,51 +60,45 @@ Time grid:
 :cadences_per_day: (*int*) Number of exposured (cadences) per day. Should be constant.
 
 
-
-.. note::
-
-   Some text
-
 Example:
 
 ::
+import pandoramoon as pandora
+params = pandora.model_params()
+R_sun = 696342000.0           # [m]
+params.R_star = 1 * R_sun     # [m]
+params.u1 = 0.4089            # [0..1]
+params.u2 = 0.2556            # [0..1]
 
-   import pandora
-   params = pandora.model_params()
-   R_sun = 696342000
-   params.R_star = 1 * R_sun  # [m]
-   params.u1 = 0.4089  # [0..1]
-   params.u2 = 0.2556  # [0..1]
+# Planet parameters
+params.per_bary = 365.25      # [days]
+params.a_bary = 215           # [R_star]
+params.r_planet = 0.1         # [R_star]
+params.b_bary = 0.3           # [0..1]
+params.t0_bary = 11           # [days]
+params.t0_bary_offset = 0     # [days]
+params.M_planet = 1.8986e+27  # [kg]
+params.w_bary = 20            # [deg]
+params.ecc_bary = 0.2         # [0..1]  
 
-   # Planet parameters
-   params.per_bary = 365.25  # [days]
-   params.a_bary = 215  # [R_star]
-   params.r_planet = 0.1  # [R_star]
-   params.b_bary = 0.3   # [0..1]
-   params.t0_bary = 11  # [days]
-   params.t0_bary_offset = 0  # [days]
-   params.M_planet = 1.8986e+27  # [kg]
-   params.w_bary = 0
-   params.ecc_bary = 0
+# Moon parameters
+params.r_moon = 0.03526       # [R_star]
+params.per_moon = 0.3         # [days]
+params.tau_moon = 0.07        # [0..1]
+params.Omega_moon = 0         # [0..360]
+params.i_moon = 80            # [0..360]
+params.e_moon = 0.9           # [0..1]
+params.w_moon = 20            # [deg]
+params.mass_ratio = 0.05395   # [0..1]
 
-   # Moon parameters
-   params.r_moon = 0.03526 # [R_star]
-   params.per_moon = 0.3 # [days]
-   params.tau_moon = 0.07  # [0..1]
-   params.Omega_moon = 0  # [0..180]
-   params.i_moon = 80  # [0..180]
-   params.e_moon = 0.9
-   params.w_moon = 20
-   params.mass_ratio = 0.05395   #[0..1]
-
-   # Other model parameters
-   params.epochs = 1  # [int]
-   params.epoch_duration = 1  # 5  # [days]
-   params.cadences_per_day = 250  # [int]
-   params.epoch_distance = 365.25   # [days]
-   params.supersampling_factor = 1  # [int]
-   params.occult_small_threshold = 0.00001  # [0..1]
-   params.hill_sphere_threshold = 1.2
+# Other model parameters
+params.epochs = 3  # [int]
+params.epoch_duration = 0.6  # 5     # [days]
+params.cadences_per_day = 250        # [int]
+params.epoch_distance = 365.26       # [days]
+params.supersampling_factor = 1      # [int]
+params.occult_small_threshold = 0.1  # [0..1]
+params.hill_sphere_threshold = 1.2
 
 
 
