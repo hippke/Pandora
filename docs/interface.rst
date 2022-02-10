@@ -227,10 +227,12 @@ Example:
    
 
 
-Convert limb darkening priors
+Convert quadratic limb darkening priors
 ---------------------------------------
 
 .. def:: helpers.ld_convert
+
+To sample the quadratic limb darkening coefficients more efficiently, Pandora offers a conversion routine to calculate $u_1=2\sqrt{q_1}q_2$ and $u_2=\sqrt{q_1}(1-2q_2)$ based on $q_1$ and $q_2$ from the unit hypercube. This procedure has been shown to reduce the prior volume \citep{2013MNRAS.435.2152K}.
 
 Parameters: 
 
