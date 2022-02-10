@@ -51,15 +51,13 @@ Other model parameters:
 :hill_sphere_threshold: (*float*) (Optional parameter, default value: 1.1) If the moon semimajor axis is larger than *hill_sphere_threshold*, the moon is considered unphysical. Then, a planet-only model is returned. The usual threshold should be close to *hill_sphere_threshold=1*. To keep unphysical systems, set a high value, e.g. *hill_sphere_threshold=100*.
 :numerical_grid: (*int*) (Optional parameter, default value: 25) Diameter in pixels of numerical grid to estimate planet-moon occultation in case at least one body is on the stellar limb. A value of 25 (100) pixels corresponds to an accuracy <1 ppm (<0.25ppm).
 :time: (*1D array of floats*) Time stamps to evaluate model at.
-:cache: (*2d array of floats*) 
+:cache: (*2d array of floats*) Optional. Can be used to speed-up model calculation in case of fixed limb-darkening parameters.
 
 Time grid:
 
 :epochs: (*int*) Number of transit epochs in time series.
 :epoch_duration: (*float*) Duration of each epoch, centered at planetary transit [days]
 :cadences_per_day: (*int*) Number of exposured (cadences) per day. Should be constant.
-
-Cached limb darkening table
 
 
 
@@ -107,6 +105,7 @@ Example:
    params.supersampling_factor = 1  # [int]
    params.occult_small_threshold = 0.00001  # [0..1]
    params.hill_sphere_threshold = 1.2
+
 
 
 
