@@ -62,7 +62,10 @@ Time grid:
 
 .. note::
 
-   There are 3 values related to planetary period: `t0_bary`, `t0_bary_offset`, and `epoch_distance`. 
+   There are 4 values related to planetary period: `t0_bary`, `t0_bary_offset`, `epoch_distance`, and `per_bary`.
+   `epoch_distance` is the true planetary period, which you may (or may not) know. If you use Pandora's `time.grid` to generate time stamps, this parameter is used as the planetary period. For sampling, the parameter should be used from your prior information, in combination with `epoch_duration`, so that the time segments are wide enough to contain all relevant transit data.
+   For sampling, `t0_bary` is the fixed single point prior information. The uncertainty and free parameter for fitting is given as `t0_bary_offset`. Similarly, `per_bary` is the free period parameter for sampling.
+   
    
 
 
