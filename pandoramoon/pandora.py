@@ -41,7 +41,7 @@ class model_params(object):
         self.i_moon = None
         self.ecc_moon = 0
         self.w_moon = 0
-        self.mass_ratio = None
+        self.M_moon = None
 
         # Other model parameters
         self.epochs = None
@@ -102,7 +102,7 @@ class moon_model(object):
         self.i_moon = params.i_moon
         self.ecc_moon = params.ecc_moon
         self.w_moon = params.w_moon
-        self.mass_ratio = params.mass_ratio
+        self.M_moon = params.M_moon
 
         # Other model parameters
         self.epoch_distance = params.epoch_distance
@@ -154,7 +154,7 @@ class moon_model(object):
             self.i_moon,
             self.ecc_moon,
             self.w_moon,
-            self.mass_ratio,
+            self.M_moon,
 
             # Other model parameters
             self.epoch_distance,
@@ -254,7 +254,7 @@ class moon_model(object):
             self.i_moon,
             self.ecc_moon,
             self.w_moon,
-            self.mass_ratio,
+            self.M_moon,
 
             # Other model parameters
             self.epoch_distance,
@@ -292,7 +292,7 @@ class moon_model(object):
             self.i_moon,
             self.ecc_moon,
             self.w_moon,
-            self.mass_ratio,
+            self.M_moon,
 
             # Other model parameters
             self.epoch_distance,
@@ -328,7 +328,7 @@ def pandora(
     i_moon,
     ecc_moon,
     w_moon,
-    mass_ratio,
+    M_moon,
     # Other model parameters
     epoch_distance,
     supersampling_factor,
@@ -353,14 +353,13 @@ def pandora(
     tau_moon = float(tau_moon)
     Omega_moon = float(Omega_moon)
     i_moon = float(i_moon)
-    mass_ratio = float(mass_ratio)
-
+    M_moon = float(M_moon)
 
     # Calculate moon period around planet
     G = 6.67408e-11
     day = 60 * 60 * 24
     a_moon = (
-        G * (M_planet + mass_ratio * M_planet) / (2 * pi / (per_moon * day)) ** 2
+        G * (M_planet + M_moon) / (2 * pi / (per_moon * day)) ** 2
     ) ** (1 / 3)
     a_moon /= R_star
 
@@ -407,7 +406,7 @@ def pandora(
                 i=i_moon,
                 time=time,
                 x_bary=x_bary,
-                mass_ratio=mass_ratio,
+                mass_ratio=M_moon / M_planet,
                 b_bary=b_bary,
             )
         else:
@@ -420,7 +419,7 @@ def pandora(
                 w=w_moon,
                 i=i_moon,
                 time=time,
-                mass_ratio=mass_ratio,
+                mass_ratio=M_moon / M_planet,
                 x_bary=x_bary,
                 b_bary=b_bary,
             )
@@ -443,6 +442,7 @@ def pandora(
         )
     else:
         flux_planet = occult_hybrid(zs=z_planet, u1=u1, u2=u2, k=r_planet)
+        #flux_planet = occult(zs=z_planet, u1=u1, u2=u2, k=r_planet)
     
     # For moon transit: User can "set occult_small_threshold > 0"
     if r_moon < occult_small_threshold:
