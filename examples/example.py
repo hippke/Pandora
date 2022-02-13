@@ -31,7 +31,7 @@ params.Omega_moon = 0  # [0..180]
 params.i_moon = 80  # [0..180]
 params.e_moon = 0.9  # [0..1]
 params.w_moon = 20  # [deg]
-params.mass_ratio = 0.05395   # [0..1]
+params.M_moon = 0.05395 * params.M_planet   # [0..1]
 
 # Other model parameters
 params.epochs = 3  # [int]
