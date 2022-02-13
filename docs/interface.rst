@@ -41,7 +41,7 @@ Moon parameters:
 :i_moon: *(float)* Orbit inclination [0..360 deg]. Should be a free parameter.
 :ecc_moon: *(float)* [0..1] Moon eccentricity.  Optional. Optional, default `0`.
 :w_moon: (*float*) [0..360 deg] Moon argument of periapsis of barycenter. Optional, default `0`.
-:mass_ratio: *(float)* [0..1]. Mass ratio M_moon / M_planet. Should be a free parameter.
+:M_moon: *(float)* Mass [kg]. Should be a free parameter when fitting.
 
 Other model parameters:
 
