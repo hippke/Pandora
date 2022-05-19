@@ -20,7 +20,7 @@ To search for moons, Pandora can used with nested samplers, e.g. [UltraNest](htt
 ```
 import pandora
 params = pandora.model_params()
-params.per_bary = 365.25  # [days] 169.7
+params.per_bary = 365.25  # [days]
 # (...) See tutorials for list of parameters
 time = pandora.time(params).grid()
 model = pandora.moon_model(params)
