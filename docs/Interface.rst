@@ -22,8 +22,8 @@ Star parameters:
 
 Barycenter parameters:
 
-:per_bary: *(float)* Period of planet-moon barycenter in units of [days]. Should be a free parameter when fitting.
-:a_bary: *(float)* Semimajor axis of planet-moon barycenter in units of [.. math:: R_{\rm star}]. Should be a free parameter when fitting.
+:per_bary: *(float)* Period of planet-moon barycenter. Unit: [days]. Should be a free parameter when fitting.
+:a_bary: *(float)* Semimajor axis of planet-moon barycenter. Unit: [:math:` R_{\rm odot}]. Should be a free parameter when fitting.
 :r_planet: *(float)* Radius [R_star]. Should be a free parameter when fitting.
 :b_bary: *(float)* Impact parameter of planet-moon barycenter [0..2]. Should be a free parameter when fitting.
 :ecc_bary: *(float)* Eccentricity of barycenter [0..1]. Optional, default `0`.
