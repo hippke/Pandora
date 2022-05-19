@@ -9,9 +9,6 @@ This describes the Python interface of Pandora. There are actually two ways to o
 Both versions must yield perfectly identical results. If you find any differences, please open a `bug ticket <https://github.com/hippke/Pandora/issues>`_ on Github.
 
 
-:duration_grid_step: *(float, default: 1.1)* Grid step width between subsequent trial durations, so that :math:`{\rm dur}_{n+1}={\rm dur}_n \times {\rm duration\_grid\_step}`. With the default value of 1.1, each subsequent trial duration is longer by 10%
-
-
 Define data for a model
 -----------------------
 
@@ -26,7 +23,7 @@ Star parameters:
 Barycenter parameters:
 
 :per_bary: *(float)* Period of planet-moon barycenter. Unit: [days]. Should be a free parameter when fitting.
-:a_bary: *(float)* Semimajor axis of planet-moon barycenter. Unit: [:math:` R_{\rm odot}]. Should be a free parameter when fitting.
+:a_bary: *(float)* Semimajor axis of planet-moon barycenter. Unit: [:math:`R_{\rm odot}`]. Should be a free parameter when fitting.
 :r_planet: *(float)* Radius [R_star]. Should be a free parameter when fitting.
 :b_bary: *(float)* Impact parameter of planet-moon barycenter [0..2]. Should be a free parameter when fitting.
 :ecc_bary: *(float)* Eccentricity of barycenter [0..1]. Optional, default `0`.
