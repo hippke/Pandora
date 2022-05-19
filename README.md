@@ -71,7 +71,7 @@ pip install ultranest dynesty h5py
 
 Attribution
 ----------------
-Please cite [Hippke et al. (2019, AJ, 158, 143)](https://ui.adsabs.harvard.edu/abs/2019AJ....158..143H/abstract) if you find this code useful in your research. The BibTeX entry for the paper is:
+Please cite [Hippke & Heller (2022, A&A in press)](https://ui.adsabs.harvard.edu/abs/2022XX....XXX..XXXX/abstract) if you find this code useful in your research. The BibTeX entry for the paper is:
 
 ```
 @ARTICLE{
