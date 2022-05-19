@@ -1,7 +1,7 @@
 ![Logo](https://github.com/hippke/Pandora/blob/main/docs/source/logo_v6.png?raw=true)
 ## Fast open-source exomoon transit detection algorithm
 
-[![pip](https://img.shields.io/badge/pip-install%20pandora--moon-blue.svg)](https://pypi.org/project/pandoramoon/)
+[![pip](https://img.shields.io/badge/pip-install%20pandoramoon-blue.svg)](https://pypi.org/project/pandoramoon/)
 [![Documentation](https://img.shields.io/badge/documentation-%E2%9C%93-blue.svg)](https://pandora-moon.readthedocs.io/en/latest/index.html)
 [![Image](https://img.shields.io/badge/tutorials-%E2%9C%93-blue.svg)](https://github.com/hippke/pandora/tree/master/tutorials)
 [![Image](https://img.shields.io/badge/arXiv-1906.00966-blue.svg)](https://arxiv.org/abs/XXXX.XXXX)
