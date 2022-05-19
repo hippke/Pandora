@@ -18,7 +18,7 @@ To search for moons, Pandora can used with nested samplers, e.g. [UltraNest](htt
 
 ### Create transit lightcurve
 ```
-import pandora
+import pandoramoon as pandora
 params = pandora.model_params()
 params.per_bary = 365.25  # [days]
 # (...) See tutorials for list of parameters
