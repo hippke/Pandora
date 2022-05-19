@@ -13,7 +13,7 @@ Pandora employs an analytical photodynamical model, including:
 - Full and partial planet-moon eclipses
 - Barycentric motion of planet and moon
 
-To search for moons, Pandora can used with nested samplers, e.g. [UltraNest](https://github.com/JohannesBuchner/UltraNest) or [dynesty](https://github.com/joshspeagle/dynesty). We provide an [example workflow](link). Pandora is fast, calculating 10,000 models and log-likelihood evaluation per second (give or take an order of magnitude, depending on parameters and data). This means that a retrieval with 250 Mio. evaluations until convergence takes about 5 hours on a single core. Scaling with cores is worse than linear. For searches in large amounts of data, it is most efficient to assign one core per lightcurve.
+To search for moons, Pandora can used with nested samplers, e.g. [UltraNest](https://github.com/JohannesBuchner/UltraNest) or [dynesty](https://github.com/joshspeagle/dynesty). We will provide an example workflow for injection and retrievals soon. Pandora is fast, calculating 10,000 models and log-likelihood evaluation per second (give or take an order of magnitude, depending on parameters and data). This means that a retrieval with 250 Mio. evaluations until convergence takes about 5 hours on a single core. Scaling with cores is worse than linear. For searches in large amounts of data, it is most efficient to assign one core per lightcurve.
 
 
 ### Create transit lightcurve
