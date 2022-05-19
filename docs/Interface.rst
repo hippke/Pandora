@@ -24,30 +24,30 @@ Barycenter parameters:
 
 :per_bary: *(float)* Period of planet-moon barycenter. Unit: [days]. Should be a free parameter when fitting.
 :a_bary: *(float)* Semimajor axis of planet-moon barycenter. Unit: [:math:`R_{\odot}`]. Should be a free parameter when fitting.
-:r_planet: *(float)* Radius [R_star]. Should be a free parameter when fitting.
+:r_planet: *(float)* Planet radius. Unit: [:math:`R_{\odot}`]. Should be a free parameter when fitting.
 :b_bary: *(float)* Impact parameter of planet-moon barycenter [0..2]. Should be a free parameter when fitting.
 :ecc_bary: *(float)* Eccentricity of barycenter [0..1]. Optional, default `0`.
 :w_bary: *(float*) Argument of periapsis of barycenter [deg].  Optional, default `0`.
 :t0_bary: *(float)* Time of inferior conjunction of planet-moon barycenter [days]. Should NOT be a free parameter when fitting.
 :t0_bary_offset: *(float)* Time difference to inferior conjunction of planet-moon barycenter [days]. Should be a free parameter when fitting.
-:M_planet: *(float)* Mass [kg]. Should be a free parameter when fitting.
+:M_planet: *(float)* Planetary mass [kg]. Should be a free parameter when fitting.
 
 Moon parameters:
 
-:r_moon: *(float)*  Radius [R_star]. Should be a free parameter.
+:r_moon: *(float)*  Radius. Unit: [:math:`R_{\odot}`]. Should be a free parameter.
 :per_moon: *(float)*  Semimajor axis [days]. Should be a free parameter.
 :tau_moon: *(float)*  Time of periapsis passage [0..1] normalized by period. Should be a free parameter.
 :Omega_moon: *(float)* Longitude of the ascending node [0..360 deg]. Should be a free parameter.
 :i_moon: *(float)* Orbit inclination [0..360 deg]. Should be a free parameter.
 :ecc_moon: *(float)* [0..1] Moon eccentricity.  Optional. Optional, default `0`.
-:w_moon: (*float*) [0..360 deg] Moon argument of periapsis of barycenter. Optional, default `0`.
+:w_moon: (*float*) [0..360 deg] Argument of periapsis of barycenter. Optional, default `0`.
 :M_moon: *(float)* Mass [kg]. Should be a free parameter when fitting.
 
 Other model parameters:
 
 :epoch_distance: (*float*) Time distance between each epoch [days]. Should NOT be a free parameter.
-:supersampling_factor: (*int*) (Optional parameter, default value: 1). In the default 1 = no supersampling. Higher values compensate for morphological deformation at the cost of computational expense.
-:occult_small_threshold: (*float*) (Optional parameter, default value: 0.01) If the moon radius (R_S/R_star) is smaller than this value, its occultation is approximated with constant limb darkening under its area. To obtain a precise estimate even for very small moons, set `occult_small_threshold` to a very small value (e.g., 1e-8).
+:supersampling_factor: (*int*) (Optional parameter, default value: 1, which represents no supersampling). Higher values are integer multiples for higher supersampling. This compensates for morphological deformation at the cost of computational expense.
+:occult_small_threshold: (*float*) (Optional parameter, default value: 0.01) If the moon radius (:math:`R_{S}/R_{\odot}`) is smaller than this value, its occultation is approximated with constant limb darkening under its area. To obtain a precise estimate even for very small moons, set `occult_small_threshold` to a very small value (e.g., :math:`1^{-8}`).
 :hill_sphere_threshold: (*float*) (Optional parameter, default value: 1.1) If the moon semimajor axis is larger than *hill_sphere_threshold*, the moon is considered unphysical. Then, a planet-only model is returned. The usual threshold should be close to *hill_sphere_threshold=1*. To keep unphysical systems, set a high value, e.g. *hill_sphere_threshold=100*.
 :numerical_grid: (*int*) (Optional parameter, default value: 25) Diameter in pixels of numerical grid to estimate planet-moon occultation in case at least one body is on the stellar limb. A value of 25 (100) pixels corresponds to an accuracy < 1 ppm (<0.25 ppm).
 :time: (*1D array of floats*) Time stamps to evaluate model at.
