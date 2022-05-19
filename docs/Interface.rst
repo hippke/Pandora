@@ -230,9 +230,9 @@ Example:
 Convert quadratic limb darkening priors
 ---------------------------------------
 
-.. def:: helpers.ld_convert
+.. function:: helpers.ld_convert
 
-To sample the quadratic limb darkening coefficients more efficiently, Pandora offers a conversion routine to calculate :math:`u_1=2\sqrt{q_1}q_2` and :math:`u_2=\sqrt{q_1}(1-2q_2)` based on :math:`q_1` and :math:`q_2$` from the unit hypercube. This procedure has been shown to reduce the prior volume `Kipping (2013) <https://ui.adsabs.harvard.edu/abs/2013MNRAS.435.2152K/abstract>`_,.
+To sample the quadratic limb darkening coefficients more efficiently, Pandora offers a conversion routine to calculate :math:`u_1=2\sqrt{q_1}q_2` and :math:`u_2=\sqrt{q_1}(1-2q_2)` based on :math:`q_1` and :math:`q_2` from the unit hypercube. This procedure has been shown to reduce the prior volume `Kipping (2013) <https://ui.adsabs.harvard.edu/abs/2013MNRAS.435.2152K/abstract>`_.
 
 Parameters: 
 
@@ -249,11 +249,9 @@ Example:
    from pandora.helpers import ld_convert
    u1, u2 = ld_convert(q1=0.4, q2=0.6)
 
-The inverse also exists:
+The inverse is also provided, e.g. for verification:
 
-.. def:: helpers.ld_invert
-
-Parameters: 
+.. function:: helpers.ld_invert
 
 Parameters: 
 
