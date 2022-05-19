@@ -188,10 +188,12 @@ Evaluate model and obtain transit video
 .. class:: model.video(time)
 
 
+
+
 Parameters:
 
 :limb_darkening: (*boolean*) If `True` (default), a limb-darkened star is painted using the model parameters u1, u2. If `False`, a uniformely yellow star is painted.
-:teff: (*float*) Star temperature in [2300..12000] K to draw the star color according to "Digital color codes of stars" ([Harre & Heller 2021](https://arxiv.org/pdf/2101.06254.pdf)).
+:teff: (*float*) Star temperature in [2300..12000] K to draw the star color according to "Digital color codes of stars" (`Harre & Heller 2021 <https://arxiv.org/pdf/2101.06254.pdf>`_).
 :planet_color: (*string*) A matplotlib color for the planet. Default: "black".
 :moon_color: (*string*) A matplotlib color for the moon. Default: "black".
 :ld_circles: (*int*) Number of concentric circles used to paint the limb-darkened star. Default: `100`.
