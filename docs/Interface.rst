@@ -248,7 +248,7 @@ Example:
 
 ::
 
-   from pandora.helpers import ld_convert
+   from pandoramoon.helpers import ld_convert
    u1, u2 = ld_convert(q1=0.4, q2=0.6)
 
 The inverse is also provided, e.g. for verification:
@@ -267,6 +267,6 @@ Example:
 
 ::
 
-   from pandora.helpers import ld_invert
+   from pandoramoon.helpers import ld_invert
    q1, q2 = ld_invert(u1=0.5, u2=0.5)
 
