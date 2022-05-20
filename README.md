@@ -58,7 +58,7 @@ Install with `pip install pandoramoon`. If you end up in dependency hell, set up
 conda create -n pandora_env python=3.9
 conda activate pandora_env
 conda install numpy matplotlib numba 
-pip install pandora-moon
+pip install pandoramoon
 ```
 
 For sampling, the following packages will be useful:
