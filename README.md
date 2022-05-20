@@ -74,10 +74,10 @@ pip install ultranest dynesty h5py
 
 Attribution
 ----------------
-Please cite [Hippke & Heller (2022, A&A in press)](https://ui.adsabs.harvard.edu/abs/2022XX....XXX..XXXX/abstract) if you find this code useful in your research. The BibTeX entry for the paper is:
+Please cite [Hippke & Heller (2022, A&A in press)](https://ui.adsabs.harvard.edu/abs/2022arXiv220509410H/abstract) if you find this code useful in your research. The BibTeX entry for the paper is:
 
 ```
-@ARTICLE{2022arXiv220509410H,
+@ARTICLE{2022arXiv220509410H
        author = {{Hippke}, Michael and {Heller}, Ren{\'e}},
         title = "{Pandora: A fast open-source exomoon transit detection algorithm}",
       journal = {arXiv e-prints},
