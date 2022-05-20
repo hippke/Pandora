@@ -77,8 +77,23 @@ Attribution
 Please cite [Hippke & Heller (2022, A&A in press)](https://ui.adsabs.harvard.edu/abs/2022XX....XXX..XXXX/abstract) if you find this code useful in your research. The BibTeX entry for the paper is:
 
 ```
-@ARTICLE{
+@ARTICLE{2022arXiv220509410H,
+       author = {{Hippke}, Michael and {Heller}, Ren{\'e}},
+        title = "{Pandora: A fast open-source exomoon transit detection algorithm}",
+      journal = {arXiv e-prints},
+     keywords = {Astrophysics - Earth and Planetary Astrophysics, Astrophysics - Instrumentation and Methods for Astrophysics},
+         year = 2022,
+        month = may,
+          eid = {arXiv:2205.09410},
+        pages = {arXiv:2205.09410},
+archivePrefix = {arXiv},
+       eprint = {2205.09410},
+ primaryClass = {astro-ph.EP},
+       adsurl = {https://ui.adsabs.harvard.edu/abs/2022arXiv220509410H},
+      adsnote = {Provided by the SAO/NASA Astrophysics Data System}
 }
+
+
 
 
 ```
