@@ -10,4 +10,4 @@ The documentation for: Pandora
    Usage
    Submit an issue <https://github.com/hippke/pandora/issues>
    Source at Github <https://github.com/hippke/pandora>
-   Read the paper <https://arxiv.org/abs/1906.00966>
+   Read the paper <https://arxiv.org/abs/2205.09410>
