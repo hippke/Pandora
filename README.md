@@ -92,8 +92,4 @@ archivePrefix = {arXiv},
        adsurl = {https://ui.adsabs.harvard.edu/abs/2022arXiv220509410H},
       adsnote = {Provided by the SAO/NASA Astrophysics Data System}
 }
-
-
-
-
 ```
