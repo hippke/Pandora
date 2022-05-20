@@ -17,6 +17,9 @@ To search for moons, Pandora can be used with nested samplers, e.g. [UltraNest](
 
 
 ### Create transit light curve
+
+The following code snippet illustrates how to work with Pandora. To keep it short, it emits the long list of required parameters. A complete and working example can be found [here](https://github.com/hippke/Pandora/blob/main/examples/example.py) 
+
 ```
 import pandoramoon as pandora
 params = pandora.model_params()
