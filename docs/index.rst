@@ -5,7 +5,7 @@ The documentation for: Pandora
    :maxdepth: 2
 
    Installation
-   Examples <https://github.com/hippke/pandora/tree/master/examples>
+   Examples <https://github.com/hippke/pandora/tree/main/examples>
    Interface
    Usage
    Submit an issue <https://github.com/hippke/pandora/issues>
