@@ -41,7 +41,7 @@ With Pandora, you can create transit videos to understand, teach, and explore ex
 
 ```
 video = model.video(
-    time=time
+    time=time,
     limb_darkening=True, 
     teff=3200,
     planet_color="black",
