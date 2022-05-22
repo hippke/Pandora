@@ -27,8 +27,8 @@ setup(
     package_data={'': ['*.csv', '*.cfg']},
     packages=['pandoramoon'],
     install_requires=[
-        'numpy',
-        'numba',
+        'numpy>=1.21',
+        'numba>=0.54',
         'tqdm',
         'matplotlib'
         ]
