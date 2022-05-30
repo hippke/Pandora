@@ -52,7 +52,7 @@ video.save(filename="video.mp4", fps=25, dpi=200)
 ```
 Videos approximate the true light curve as calculated by Pandora very well. They are, however, not pixel-perfect due to the underlying Matplotlib render engine. Klick the image to view the video:
 
-[![Video](https://github.com/hippke/Pandora/blob/main/docs/source/Screenshot%202022-05-19%20at%2023.39.03.png?raw=true)](https://youtu.be/TDbj5AnjDU8)
+[![Video](https://github.com/hippke/Pandora/blob/main/docs/source/Screenshot%202022-05-19%20at%2023.39.03.png?raw=true)](https://youtu.be/89lEuPgrl8s)
 
 ### Installation
 Install with `pip install pandoramoon`. If you end up in dependency hell, set up a fresh environment:
