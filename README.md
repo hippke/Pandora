@@ -74,22 +74,21 @@ pip install ultranest dynesty h5py
 
 Attribution
 ----------------
-Please cite [Hippke & Heller (2022, A&A in press)](https://ui.adsabs.harvard.edu/abs/2022arXiv220509410H/abstract) if you find this code useful in your research. The BibTeX entry for the paper is:
+Please cite [Hippke & Heller (2022, A&A)](https://ui.adsabs.harvard.edu/abs/2022A%26A...662A..37H/abstract) if you find this code useful in your research. The BibTeX entry for the paper is:
 
 ```
-@ARTICLE{2022arXiv220509410H
+@ARTICLE{2022A&A...662A..37H,
        author = {{Hippke}, Michael and {Heller}, Ren{\'e}},
         title = "{Pandora: A fast open-source exomoon transit detection algorithm}",
-      journal = {arXiv e-prints},
-     keywords = {Astrophysics - Earth and Planetary Astrophysics, Astrophysics - Instrumentation and Methods for Astrophysics},
+      journal = {\aap},
+     keywords = {methods: data analysis, planets and satellites: detection, techniques: photometric},
          year = 2022,
-        month = may,
-          eid = {arXiv:2205.09410},
-        pages = {arXiv:2205.09410},
-archivePrefix = {arXiv},
-       eprint = {2205.09410},
- primaryClass = {astro-ph.EP},
-       adsurl = {https://ui.adsabs.harvard.edu/abs/2022arXiv220509410H},
+        month = jun,
+       volume = {662},
+          eid = {A37},
+        pages = {A37},
+          doi = {10.1051/0004-6361/202243129},
+       adsurl = {https://ui.adsabs.harvard.edu/abs/2022A&A...662A..37H},
       adsnote = {Provided by the SAO/NASA Astrophysics Data System}
 }
 ```
