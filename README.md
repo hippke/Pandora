@@ -4,7 +4,7 @@
 [![pip](https://img.shields.io/badge/pip-install%20pandoramoon-blue.svg)](https://pypi.org/project/pandoramoon/)
 [![Documentation](https://img.shields.io/badge/Documentation-%E2%9C%93-blue.svg)](https://pandora-moon.readthedocs.io/en/latest/index.html)
 [![Image](https://img.shields.io/badge/Examples-%E2%9C%93-blue.svg)](https://github.com/hippke/Pandora/tree/main/examples)
-[![Image](https://img.shields.io/badge/arXiv-2205.09410-blue.svg)](https://arxiv.org/abs/2205.09410))
+[![Image](https://img.shields.io/badge/arXiv-2205.09410-blue.svg)](https://arxiv.org/abs/2205.09410)
 
 > Named after the imaginary 5th moon of the gas giant Polyphemus, orbiting Alpha Centauri A, in the film [Avatar](https://james-camerons-avatar.fandom.com/wiki/Pandora). 
 
