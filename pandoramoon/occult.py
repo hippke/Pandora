@@ -41,6 +41,10 @@ def read_occult_cache(zs_target, k, cache):
         if res < 0:
             res = 0
         flux[idx] = res
+
+        # Some combinations of (u1,u2) cause flux>1 which is unphysical
+        if flux[idx] > 1:
+            flux[idx] = 1
     return flux
 
 
@@ -76,6 +80,10 @@ def occult_small(zs, k, u1, u2):
             limb_darkening = 1 - u1 * (1 - m) - u2 * (1 - m) ** 2
             area = cci(1, k, b[j])
             f[j] = (s - limb_darkening * area) * s_inv
+
+            # Some combinations of (u1,u2) cause flux>1 which is unphysical
+            if f[j] > 1:
+                f[j] = 1
     return f
 
 
@@ -89,7 +97,12 @@ def occult_small_single_value(z, k, u1, u2):
     m = sqrt(1 - min(z**2, 1))
     limb_darkening = 1 - u1 * (1 - m) - u2 * (1 - m) ** 2
     area = cci(1, k, z)
-    return (s - limb_darkening * area) * (1 / s)
+    flux = (s - limb_darkening * area) * (1 / s)
+
+    # Some combinations of (u1,u2) cause flux>1 which is unphysical
+    if flux > 1:
+        flux = 1
+    return flux
 
 
 @jit(cache=True, nopython=True, fastmath=True, parallel=False)
@@ -320,6 +333,10 @@ def occult(zs, k, u1, u2):
                 ) * (3 + 2 * k - 8 * k2)
             ed[i] = k2 / 2 * (k2 + 2 * z2)
         flux[i] = 1 - (c1 * le[i] + c2 * ld[i] + u2 * ed[i]) * omega
+
+        # Some combinations of (u1,u2) cause flux>1 which is unphysical
+        if flux[i] > 1:
+                flux[i] = 1
     return flux
 
 
@@ -425,6 +442,7 @@ def occult_hybrid(zs, k, u1, u2):
             or (i >= 0 and k <= 0.01 and z <= 0.98)
         ):
             # Perform linear interpolation correction
+            testv = occult_small_single_value(z, k, u1, u2)
             flux[i] = (
                 occult_small_single_value(z, k, u1, u2)
                 + interpol_flux_1
@@ -434,7 +452,6 @@ def occult_hybrid(zs, k, u1, u2):
 
         # Occulting body transits the source: Table 3, Case IV:
         if z < (1 - k):
-            # print(i, k, z)
             q = sqrt((x2 - x1) / (1 - x1))
             ldx = (
                 2
@@ -464,5 +481,9 @@ def occult_hybrid(zs, k, u1, u2):
             interpol_flux_2 = current_flux - occult_small_single_value(z, k, u1, u2)
         else:
             flux[i] = current_flux
+
+        # Some combinations of (u1,u2) cause flux>1 which is unphysical
+        if flux[i] > 1:
+                flux[i] = 1
 
     return flux
