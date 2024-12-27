@@ -55,18 +55,18 @@ Videos approximate the true light curve as calculated by Pandora very well. They
 [![Video](https://github.com/hippke/Pandora/blob/main/docs/source/Screenshot%202022-05-19%20at%2023.39.03.png?raw=true)](https://youtu.be/89lEuPgrl8s)
 
 ### Installation
-Install with `pip install pandoramoon`. If you end up in dependency hell, set up a fresh environment:
+Install with `pip install pandoramoon`. As of 2024, there are some incompatibilities with later versions of numba. For now, please use:
 
 ```
 conda create -n pandora_env python=3.9
 conda activate pandora_env
-conda install numpy matplotlib numba 
+pip install numpy==1.21 matplotlib==3.5 numba==0.55
 pip install pandoramoon
 ```
 
 For sampling, the following packages will be useful:
 ```
-conda install cython scipy
+pip install scipy==1.8 cython
 pip install ultranest dynesty h5py
 ```
 
