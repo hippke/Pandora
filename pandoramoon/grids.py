@@ -8,11 +8,10 @@ def timegrid(t0_bary, epochs, epoch_duration, cadences_per_day, epoch_distance, 
     # epoch_distance is the fixed constant distance between subsequent data epochs
     # Should be identical to the initial guess of the planetary period
     # The planetary period `per_bary`, however, is a free parameter
-    ti_epoch_midtimes = np.arange(
-        start=t0_bary,
-        stop=t0_bary + epoch_distance * epochs,
-        step=epoch_distance,
-    )
+    start = np.float64(t0_bary)
+    step = np.float64(epoch_distance)
+    stop = np.float64(t0_bary + epoch_distance * epochs)
+    ti_epoch_midtimes = np.arange(start, stop, step)
 
     # arrays of epoch start and end dates [day]
     t_starts = ti_epoch_midtimes - epoch_duration / 2
