@@ -215,8 +215,9 @@ class moon_model(object):
         )
 
         def ani(coords):
-            moon.set_data(coords[0], coords[1])
-            planet.set_data(coords[2], coords[3])
+            mx, my, px, py = coords
+            moon.set_data([mx], [my])
+            planet.set_data([px], [py])
             pbar.update(1)
             return moon, planet
 
