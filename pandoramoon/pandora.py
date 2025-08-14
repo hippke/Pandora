@@ -226,7 +226,7 @@ class moon_model(object):
                 yield mx, my, px, py
 
         pbar = tqdm(total=len(self.mx))
-        ani = FuncAnimation(fig, ani, frames=frames, save_count=1e15, blit=True)
+        ani = FuncAnimation(fig, ani, frames=frames, save_count=int(1e15), blit=True)
         return ani
 
 
