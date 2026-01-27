@@ -66,7 +66,7 @@ pip install pandoramoon
 To test, run:
 ```
 git clone https://github.com/hippke/Pandora/
-cd Pandora/test
+cd Pandora/examples
 python example.py
 ```
 This should show a Matplotlib figure and produce a video within a minute.
