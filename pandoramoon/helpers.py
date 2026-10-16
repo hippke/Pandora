@@ -9,7 +9,7 @@ def resample(arr, factor):
     out_arr = np.ones(out_samples)
     for idx in range(out_samples):
         start = idx * factor
-        end = start + factor - 1
+        end = start + factor
         out_arr[idx] = np.mean(arr[start:end])
     return out_arr
 
