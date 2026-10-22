@@ -78,6 +78,10 @@ pip install ultranest dynesty h5py
 
 
 
+Contributing
+----------------
+All my repositories embrace collaboration between humans and AI. Contributions are welcome, whether they are written by you, by an AI assistant, or by both together, and they will be handled promptly. Please open an [issue](https://github.com/hippke/pandora/issues) or a pull request.
+
 Attribution
 ----------------
 Please cite [Hippke & Heller (2022, A&A)](https://ui.adsabs.harvard.edu/abs/2022A%26A...662A..37H/abstract) if you find this code useful in your research. The BibTeX entry for the paper is:
