@@ -29,7 +29,10 @@ setup(
     install_requires=[
         'numpy>=1.21',
         'numba>=0.54',
-        'tqdm',
-        'matplotlib'
-        ]
+        ],
+    extras_require={
+        # videos (model.video) and plots (plot_run, plot_corner); prepare_lightcurve needs wotan
+        'plots': ['matplotlib', 'tqdm', 'corner'],
+        'search': ['wotan'],
+        },
 )

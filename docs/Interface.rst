@@ -47,9 +47,9 @@ Other model parameters:
 
 :epoch_distance: (*float*) Time distance between each epoch [days]. Should NOT be a free parameter.
 :supersampling_factor: (*int*) (Optional parameter, default value: 1, which represents no supersampling). Higher values are integer multiples for higher supersampling. This compensates for morphological deformation at the cost of computational expense.
-:occult_small_threshold: (*float*) (Optional parameter, default value: 0.01) If the moon radius (:math:`R_{S}/R_{\odot}`) is smaller than this value, its occultation is approximated with constant limb darkening under its area. To obtain a precise estimate even for very small moons, set `occult_small_threshold` to a very small value (e.g., :math:`1^{-8}`).
-:hill_sphere_threshold: (*float*) (Optional parameter, default value: 1.1) If the moon semimajor axis is larger than *hill_sphere_threshold*, the moon is considered unphysical. Then, a planet-only model is returned. The usual threshold should be close to *hill_sphere_threshold=1*. To keep unphysical systems, set a high value, e.g. *hill_sphere_threshold=100*.
-:numerical_grid: (*int*) (Optional parameter, default value: 25) Diameter in pixels of numerical grid to estimate planet-moon occultation in case at least one body is on the stellar limb. A value of 25 (100) pixels corresponds to an accuracy < 1 ppm (<0.25 ppm).
+:occult_small_threshold: (*float*) (Optional parameter, default value: 0) If the moon radius (:math:`R_{S}/R_{\odot}`) is smaller than this value, its occultation is approximated with constant limb darkening under its area (small-body approximation; about 4 ppm error at 0.01, 105 ppm at 0.035, 1300 ppm at 0.1). The default 0 always uses the exact Mandel-Agol model, which is fast enough for sampling. Set a positive value only to trade accuracy for a few percent of speed.
+:hill_sphere_threshold: (*float*) (Optional parameter, default value: 1.0) If the moon semimajor axis is larger than *hill_sphere_threshold* times the planet's Hill radius, the moon is considered unphysical. Then, a planet-only model is returned. To keep unphysical systems, set a high value, e.g. *hill_sphere_threshold=100*. (Until 2026-10 the default was 1.1.)
+:eclipse_method: Mutual planet-moon eclipses while a body is on the stellar limb use the exact three-circle overlap of star, planet and moon; eclipses with both bodies fully on (or off) the stellar disk use the exact two-circle overlap. (The legacy pixel raster, ``eclipse_method="pixelmap"`` with ``numerical_grid``, was removed in 2026-10; ``numerical_grid`` is no longer an argument of the model functions.)
 :time: (*1D array of floats*) Time stamps to evaluate model at.
 :cache: (*2d array of floats*) Optional. Can be used to speed-up model calculation in case of fixed limb-darkening parameters.
 
@@ -107,7 +107,7 @@ Example:
    params.cadences_per_day = 250        # [int]
    params.epoch_distance = 365.26       # [days]
    params.supersampling_factor = 1      # [int]
-   params.occult_small_threshold = 0.1  # [0..1]
+   params.occult_small_threshold = 0    # 0: exact
    params.hill_sphere_threshold = 1.2
 
 
@@ -270,3 +270,20 @@ Example:
    from pandoramoon.helpers import ld_invert
    q1, q2 = ld_invert(u1=0.5, u2=0.5)
 
+
+Configuration
+-------------
+
+Two files in the package directory hold the values that are not function arguments:
+
+:physics.cfg: physical constants (G, day, R_sun, M_sun, M_jup), available as ``pandoramoon.constants``.
+:settings.cfg: default settings and tuning values, each with its source: ``[model]`` (defaults of ``hill_sphere_threshold`` and ``occult_small_threshold``), ``[supersampling]`` (``NestedSampler(supersampling="auto")``), ``[fit]`` (accuracy presets, run and step limits), ``[fit_rules]`` (the decision rules of the fit, ``pandoramoon.nss.FIT_RULES``), ``[detect]`` (recall presets, threshold and jackknife cut of ``detect``), ``[prepare]`` (defaults of ``prepare_lightcurve``) and ``[priors]`` (factors of ``default_priors``).
+
+Both are read once at import (``pandoramoon._config.settings()`` returns the parsed settings). Arguments passed to a function override the file's defaults. Changing the files changes calibrated behaviour (detection threshold, fit accuracy); prefer function arguments.
+
+Numerical code is compiled by numba on first use and cached. Pandora hashes its source, configuration and table files at import and clears its numba cache once when any of them changed, so edits to the ``.cfg`` files take effect (one recompilation).
+
+Environment variables:
+
+:PANDORA_QUIET: ``1`` silences the compile notice on stderr.
+:PANDORA_BUILDING_TABLES: ``1`` only while regenerating the limb-darkening tables (``occult.py``); otherwise a missing table raises an error.

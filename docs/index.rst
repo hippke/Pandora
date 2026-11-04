@@ -7,6 +7,7 @@ The documentation for: Pandora
    Installation
    Examples <https://github.com/hippke/pandora/tree/main/examples>
    Interface
+   Fitting
    Usage
    Submit an issue <https://github.com/hippke/pandora/issues>
    Source at Github <https://github.com/hippke/pandora>

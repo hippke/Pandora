@@ -1,78 +1,35 @@
-import numpy as np
-from numpy import sqrt, pi, arcsin, cos, degrees
+"""Pandora's public model functions: pandora() (fluxes and sky positions), pandora_flux(), pandora_deficit(),
+pandora_window(), and the class-based interface moon_model. The parameter container and range check are in
+params.py, the compiled model core and the log-likelihoods in kernel.py (re-exported here, so that
+pandoramoon.pandora.pandora_loglike etc. keep working)."""
 from numba import jit
-from tqdm import tqdm
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
-from os import path
 
-# Pandora
-from pandoramoon.eclipse import eclipse
-from pandoramoon.ellipse import ellipse, ellipse_ecc
-from pandoramoon.occult import occult, occult_small, occult_hybrid, create_occult_cache, read_occult_cache
-from pandoramoon.helpers import resample
-from pandoramoon.grids import timegrid, x_bary_grid
-
-
-class model_params(object):
-    def __init__(self):
-
-        # Star parameters
-        self.u1 = None
-        self.u2 = None
-        self.R_star = None
-
-        # Planet parameters
-        self.per_bary = None
-        self.a_bary = None
-        self.r_planet = None
-        self.b_bary = None
-        self.w_bary = 0
-        self.ecc_bary = 0
-        self.t0_bary = None
-        self.t0_bary_offset = None
-        self.M_planet = None
-
-        # Moon parameters
-        self.r_moon = None
-        self.per_moon = None
-        self.tau_moon = None
-        self.Omega_moon = None
-        self.i_moon = None
-        self.ecc_moon = 0
-        self.w_moon = 0
-        self.M_moon = None
-
-        # Other model parameters
-        self.epochs = None
-        self.epoch_duration = None
-        self.cadences_per_day = None
-        self.epoch_distance = None
-        self.supersampling_factor = 1
-        self.occult_small_threshold = 0.01
-        self.hill_sphere_threshold = 1.1
-        self.numerical_grid = 25
-        self.time = None
-
-
-class time(object):
-    def __init__(self, params):
-        self.t0_bary = params.t0_bary
-        self.epochs = params.epochs
-        self.epoch_duration = params.epoch_duration
-        self.cadences_per_day = params.cadences_per_day
-        self.epoch_distance = params.epoch_distance
-        self.supersampling_factor = params.supersampling_factor
-
-    def grid(self):
-        return timegrid(
-            self.t0_bary, 
-            self.epochs, 
-            self.epoch_duration, 
-            self.cadences_per_day, 
-            self.epoch_distance, 
-            self.supersampling_factor
-        )
+from pandoramoon.params import PARAMS_ERROR, params_valid, check_params, model_params, time  # noqa: F401
+from pandoramoon.kernel import (  # noqa: F401
+    NEG_INF,
+    pandora_loglike,
+    PLANET_ONLY_MOON,
+    pandora_loglike_planet,
+    _moon_setup,
+    _orbit,
+    _orbit_z,
+    _cull_reach,
+    _cull_window,
+    _window_fluxes,
+    _window_fluxes_z,
+    _scatter,
+    _total_and_resample,
+    _window_model,
+    _idx_runs,
+    _window_model_runs,
+    _n_out,
+    _window_cadences,
+    _window_chi2_runs,
+    _window_chi2_runs_planet,
+    _densify,
+    _densify_deficit32,
+)
+from pandoramoon.grids import x_bary_grid  # noqa: F401
 
 
 class moon_model(object):
@@ -109,200 +66,38 @@ class moon_model(object):
         self.supersampling_factor = params.supersampling_factor
         self.occult_small_threshold = params.occult_small_threshold
         self.hill_sphere_threshold = params.hill_sphere_threshold
-        self.numerical_grid = params.numerical_grid
-        self.time = params.time
-        self.cache = create_occult_cache(self.u1, self.u2, dim=300)
+        if getattr(params, "eclipse_method", "analytic") != "analytic":
+            raise ValueError('eclipse_method: only "analytic" (the pixel raster "pixelmap" was removed in 2026-10)')
 
-    def video(
-        self,
-        time,
-        limb_darkening=True,
-        teff=6000,
-        planet_color="black",
-        moon_color="black",
-        ld_circles=100,
-    ):
-        (
-            self.flux_planet,
-            self.flux_moon,
-            self.flux_total,
-            self.px,
-            self.py,
-            self.mx,
-            self.my
-        ) = pandora(
-            self.u1,
-            self.u2,
-            self.R_star,
-
-            # Planet parameters
-            self.per_bary,
-            self.a_bary,
-            self.r_planet,
-            self.b_bary,
-            self.w_bary,
-            self.ecc_bary,
-            self.t0_bary,
-            self.t0_bary_offset,
-            self.M_planet,
-
-            # Moon parameters
-            self.r_moon,
-            self.per_moon,
-            self.tau_moon,
-            self.Omega_moon,
-            self.i_moon,
-            self.ecc_moon,
-            self.w_moon,
+    def _evaluate(self, time, cache=None):
+        """pandora() for this model at the given (supersampled) time grid"""
+        return pandora(
+            self.u1, self.u2, self.R_star,
+            self.per_bary, self.a_bary, self.r_planet, self.b_bary, self.w_bary, self.ecc_bary, self.t0_bary,
+            self.t0_bary_offset, self.M_planet,
+            self.r_moon, self.per_moon, self.tau_moon, self.Omega_moon, self.i_moon, self.ecc_moon, self.w_moon,
             self.M_moon,
+            self.epoch_distance, self.supersampling_factor, self.occult_small_threshold, self.hill_sphere_threshold,
+            time, cache)
 
-            # Other model parameters
-            self.epoch_distance,
-            self.supersampling_factor,
-            self.occult_small_threshold,
-            self.hill_sphere_threshold,
-            self.numerical_grid,
-            time
-        )
-        # Build video with matplotlib
-        fig = plt.figure(figsize=(5, 5))
-        axes = fig.add_subplot(111)
-        plt.axis("off")
-        plt.style.use("dark_background")
-        plt.gcf().gca().add_artist(plt.Circle((0, 0), 5, color="black"))
-        if limb_darkening:
-            if teff > 12000:
-                teff = 12000
-            if teff < 2300:
-                teff = 2300
-            data_dir = path.join(path.join(path.dirname(__file__)), "star_colors.csv")
-            star_colors = np.genfromtxt(data_dir, delimiter=",")
-            row = np.argmax(star_colors[:, 0] >= teff)
-            r_star = star_colors[row, 1]
-            g_star = star_colors[row, 2]
-            b_star = star_colors[row, 3]
-            for i in reversed(range(ld_circles)):
-                impact = i / ld_circles
-                m = sqrt(1 - min(impact ** 2, 1))
-                ld = 1 - self.u1 * (1 - m) - self.u2 * (1 - m) ** 2
-                r = r_star * ld
-                g = g_star * ld
-                b = b_star * ld
-                sun = plt.Circle((0, 0), impact, color=(r, g, b))
-                plt.gcf().gca().add_artist(sun)
-        else:
-            plt.gcf().gca().add_artist(plt.Circle((0, 0), 1, color="yellow"))
-
-        axes.set_xlim(-1.05, 1.05)
-        axes.set_ylim(-1.05, 1.05)
-        (moon,) = axes.plot(
-            self.mx[0],
-            self.my[0],
-            "o",
-            color=planet_color,
-            markerfacecolor=moon_color,
-            markeredgecolor=moon_color,
-            markersize=260 * self.r_moon,
-        )
-        (planet,) = axes.plot(
-            self.px[0],
-            self.py[0],
-            "o",
-            color=planet_color,
-            markeredgecolor=planet_color,
-            markerfacecolor=planet_color,
-            markersize=260 * self.r_planet,
-        )
-
-        def ani(coords):
-            mx, my, px, py = coords
-            moon.set_data([mx], [my])
-            planet.set_data([px], [py])
-            pbar.update(1)
-            return moon, planet
-
-        def frames():
-            for mx, my, px, py in zip(self.mx, self.my, self.px, self.py):
-                yield mx, my, px, py
-
-        pbar = tqdm(total=len(self.mx))
-        ani = FuncAnimation(fig, ani, frames=frames, save_count=int(1e15), blit=True)
-        return ani
-
+    def video(self, time, limb_darkening=True, teff=6000, planet_color="black", moon_color="black", ld_circles=100):
+        """matplotlib animation of the transit (pandoramoon.video.transit_video); save it with
+        video.save("video.mp4", fps=25, dpi=200). Also sets self.flux_planet, flux_moon, flux_total, px, py, mx, my."""
+        from pandoramoon.video import transit_video
+        (self.flux_planet, self.flux_moon, self.flux_total,
+         self.px, self.py, self.mx, self.my) = self._evaluate(time)
+        return transit_video(self.px, self.py, self.mx, self.my, self.u1, self.u2, self.r_planet, self.r_moon,
+                             limb_darkening=limb_darkening, teff=teff, planet_color=planet_color,
+                             moon_color=moon_color, ld_circles=ld_circles)
 
     def light_curve(self, time):
-        flux_planet, flux_moon, flux_total, px, py, mx, my = pandora(
-            self.u1,
-            self.u2,
-            self.R_star,
-
-            # Planet parameters
-            self.per_bary,
-            self.a_bary,
-            self.r_planet,
-            self.b_bary,
-            self.w_bary,
-            self.ecc_bary,
-            self.t0_bary,
-            self.t0_bary_offset,
-            self.M_planet,
-
-            # Moon parameters
-            self.r_moon,
-            self.per_moon,
-            self.tau_moon,
-            self.Omega_moon,
-            self.i_moon,
-            self.ecc_moon,
-            self.w_moon,
-            self.M_moon,
-
-            # Other model parameters
-            self.epoch_distance,
-            self.supersampling_factor,
-            self.occult_small_threshold,
-            self.hill_sphere_threshold,
-            self.numerical_grid,
-            time,
-            self.cache
-        )
+        """total, planet and moon flux at the output cadences"""
+        flux_planet, flux_moon, flux_total, px, py, mx, my = self._evaluate(time)
         return flux_total, flux_planet, flux_moon
 
     def coordinates(self, time):
-        flux_planet, flux_moon, flux_total, px, py, mx, my = pandora(
-            self.u1,
-            self.u2,
-            self.R_star,
-
-            # Planet parameters
-            self.per_bary,
-            self.a_bary,
-            self.r_planet,
-            self.b_bary,
-            self.w_bary,
-            self.ecc_bary,
-            self.t0_bary,
-            self.t0_bary_offset,
-            self.M_planet,
-
-            # Moon parameters
-            self.r_moon,
-            self.per_moon,
-            self.tau_moon,
-            self.Omega_moon,
-            self.i_moon,
-            self.ecc_moon,
-            self.w_moon,
-            self.M_moon,
-
-            # Other model parameters
-            self.epoch_distance,
-            self.supersampling_factor,
-            self.occult_small_threshold,
-            self.hill_sphere_threshold,
-            self.numerical_grid,
-            time
-        )
+        """sky positions of the planet (px, py) and the moon (mx, my) [R_star] at every (supersampled) time"""
+        flux_planet, flux_moon, flux_total, px, py, mx, my = self._evaluate(time)
         return px, py, mx, my
 
 
@@ -335,10 +130,17 @@ def pandora(
     supersampling_factor,
     occult_small_threshold,
     hill_sphere_threshold,
-    numerical_grid,
     time,
-    cache=None
+    cache=None,
 ):
+    # limb mutual eclipses via the exact analytic three-circle overlap (eclipse.py, overlap_analytic.py)
+    if not params_valid(
+        u1, u2, R_star, per_bary, a_bary, r_planet, b_bary, w_bary, ecc_bary,
+        t0_bary, t0_bary_offset, M_planet, r_moon, per_moon, tau_moon,
+        Omega_moon, i_moon, ecc_moon, w_moon, M_moon, epoch_distance,
+        supersampling_factor
+    ):
+        raise ValueError(PARAMS_ERROR)
 
     # Make sure to work with floats. Large values as ints would overflow.
     R_star = float(R_star)
@@ -356,14 +158,10 @@ def pandora(
     i_moon = float(i_moon)
     M_moon = float(M_moon)
 
-    # Calculate moon period around planet
-    G = 6.67408e-11
-    day = 60 * 60 * 24
-    a_moon = (
-        G * (M_planet + M_moon) / (2 * pi / (per_moon * day)) ** 2
-    ) ** (1 / 3)
-    a_moon /= R_star
-
+    a_moon, unphysical = _moon_setup(
+        R_star, per_bary, a_bary, M_planet, M_moon, per_moon, ecc_moon,
+        r_planet, r_moon, hill_sphere_threshold
+    )
     x_bary = x_bary_grid(
         time, 
         a_bary, 
@@ -374,94 +172,216 @@ def pandora(
         ecc_bary, 
         w_bary
     )
+    xm, ym, xp, yp = _orbit(
+        time, x_bary, unphysical, a_moon, per_moon, tau_moon, Omega_moon,
+        w_moon, i_moon, ecc_moon, M_moon / M_planet, b_bary
+    )
 
-    # Check physical plausibility of a_moon
-    # Should be inside [Roche lobe, Hill sphere] plus/minus some user-set margin
-    M_star = ((4 * pi ** 2 / G) * ((a_bary * R_star) ** 3)) / (per_bary * day) ** 2
-    r_hill = a_bary * (M_planet / (3 * M_star)) ** (1 / 3)
-    r_hill_fraction = a_moon / r_hill
-    if r_hill_fraction > hill_sphere_threshold:
-        unphysical = True
-    else:
-        unphysical = False
-
-    # Roche lobe: Not used here, because we don't know densities of planet and moon
-    # Instead of taking density guesses, we just demand a_moon > (R_planet + R_moon)
-    if a_moon < (r_planet + r_moon):
-        unphysical = True
-
-    # Unphysical moon orbit: Keep planet, but put moon at far out of transit position
-    if unphysical:
-        bignum = 1e8
-        xp = x_bary
-        yp = np.full(len(x_bary), b_bary)
-        xm = np.full(len(x_bary), bignum)
-        ym = xm.copy()
-    else:  # valid, physical system
-        if ecc_moon == 0:
-            xm, ym, xp, yp = ellipse(
-                a=a_moon,
-                per=per_moon,
-                tau=tau_moon,
-                Omega=Omega_moon,
-                i=i_moon,
-                time=time,
-                x_bary=x_bary,
-                mass_ratio=M_moon / M_planet,
-                b_bary=b_bary,
-            )
-        else:
-            xm, ym, xp, yp = ellipse_ecc(
-                a=a_moon,
-                per=per_moon,
-                e=ecc_moon,
-                tau=tau_moon,
-                Omega=Omega_moon,
-                w=w_moon,
-                i=i_moon,
-                time=time,
-                mass_ratio=M_moon / M_planet,
-                x_bary=x_bary,
-                b_bary=b_bary,
-            )
-
-    # Distances of planet and moon from (0,0) = center of star
-    # Not sufficient to only calculate z in ellipse func: 
-    # We also need full coordinates to determine mutual eclipses below
-    z_planet = sqrt(xp ** 2 + yp ** 2)
-    if unphysical:
-        z_moon = xm.copy()
-    else:
-        z_moon = sqrt(xm ** 2 + ym ** 2)
-
-    # Cached Mandel-Agol occultation model for planet < 0.1, else hybrid
-    if cache is not None and r_planet < 0.1:
-        flux_planet = read_occult_cache(
-            zs_target=z_planet, 
-            k=r_planet, 
-            cache=cache
+    # Occultations and mutual eclipses only for samples that can be in
+    # transit; all others have flux exactly 1 (see _cull_window)
+    idx = _cull_window(
+        x_bary, _cull_reach(a_moon, ecc_moon, r_planet, r_moon, unphysical, cache)
+    )
+    if len(idx) == len(time):
+        flux_planet, flux_moon = _window_fluxes(
+            xp, yp, xm, ym, unphysical, r_planet, r_moon, u1, u2,
+            occult_small_threshold, cache
         )
     else:
-        flux_planet = occult_hybrid(zs=z_planet, u1=u1, u2=u2, k=r_planet)
-        #flux_planet = occult(zs=z_planet, u1=u1, u2=u2, k=r_planet)
-    
-    # For moon transit: User can "set occult_small_threshold > 0"
-    if r_moon < occult_small_threshold:
-        flux_moon = occult_small(zs=z_moon, k=r_moon, u1=u1, u2=u2)
-    elif cache is not None and r_moon < 0.1:
-        flux_moon = read_occult_cache(zs_target=z_moon, k=r_moon, cache=cache)
-    else:
-        flux_moon = occult_hybrid(zs=z_moon, k=r_moon, u1=u1, u2=u2)
-
-    # Mutual planet-moon occultations
-    if not unphysical:# and eclipses_occur:
-        flux_moon = eclipse(xp, yp, xm, ym, r_planet, r_moon, flux_moon, numerical_grid)
-    flux_total = flux_moon + flux_planet - 1
-
-    # Supersampling downconversion
-    if supersampling_factor > 1:
-        flux_planet = resample(flux_planet, supersampling_factor)
-        flux_moon = resample(flux_moon, supersampling_factor)
-        flux_total = resample(flux_total, supersampling_factor)
-
+        flux_planet_w, flux_moon_w = _window_fluxes(
+            xp[idx], yp[idx], xm[idx], ym[idx], unphysical, r_planet, r_moon,
+            u1, u2, occult_small_threshold, cache
+        )
+        flux_planet, flux_moon = _scatter(len(time), idx, flux_planet_w, flux_moon_w)
+    flux_planet, flux_moon, flux_total = _total_and_resample(
+        flux_planet, flux_moon, supersampling_factor
+    )
     return flux_planet, flux_moon, flux_total, xp, yp, xm, ym
+
+
+@jit(cache=True, nopython=True, fastmath=True, parallel=False)
+def pandora_flux(
+    u1,
+    u2,
+    R_star,
+    # Planet parameters
+    per_bary,
+    a_bary,
+    r_planet,
+    b_bary,
+    w_bary,
+    ecc_bary,
+    t0_bary,
+    t0_bary_offset,
+    M_planet,
+    # Moon parameters
+    r_moon,
+    per_moon,
+    tau_moon,
+    Omega_moon,
+    i_moon,
+    ecc_moon,
+    w_moon,
+    M_moon,
+    # Other model parameters
+    epoch_distance,
+    supersampling_factor,
+    occult_small_threshold,
+    hill_sphere_threshold,
+    time,
+    cache=None,
+):
+    """Same arguments and fluxes as pandora(), but returns only
+    (flux_planet, flux_moon, flux_total) and computes the orbit only for
+    samples that can be in transit. float64, full length (output cadence).
+    For likelihoods, Likelihood (no full-length arrays) or pandora_deficit()
+    (float32) are faster."""
+    if not params_valid(
+        u1, u2, R_star, per_bary, a_bary, r_planet, b_bary, w_bary, ecc_bary,
+        t0_bary, t0_bary_offset, M_planet, r_moon, per_moon, tau_moon,
+        Omega_moon, i_moon, ecc_moon, w_moon, M_moon, epoch_distance,
+        supersampling_factor
+    ):
+        raise ValueError(PARAMS_ERROR)
+    idx, flux_planet_w, flux_moon_w = _window_model(
+        u1, u2, R_star, per_bary, a_bary, r_planet, b_bary, w_bary, ecc_bary,
+        t0_bary, t0_bary_offset, M_planet, r_moon, per_moon, tau_moon,
+        Omega_moon, i_moon, ecc_moon, w_moon, M_moon, epoch_distance,
+        occult_small_threshold, hill_sphere_threshold, time,
+        cache, False
+    )
+    out_idx, fp, fm, ft = _window_cadences(
+        len(time), idx, flux_planet_w, flux_moon_w, supersampling_factor
+    )
+    n_out = _n_out(len(time), supersampling_factor)
+    return (
+        _densify(n_out, out_idx, fp, 1.0),
+        _densify(n_out, out_idx, fm, 1.0),
+        _densify(n_out, out_idx, ft, 1.0),
+    )
+
+
+@jit(cache=True, nopython=True, fastmath=True, parallel=False)
+def pandora_deficit(
+    u1,
+    u2,
+    R_star,
+    # Planet parameters
+    per_bary,
+    a_bary,
+    r_planet,
+    b_bary,
+    w_bary,
+    ecc_bary,
+    t0_bary,
+    t0_bary_offset,
+    M_planet,
+    # Moon parameters
+    r_moon,
+    per_moon,
+    tau_moon,
+    Omega_moon,
+    i_moon,
+    ecc_moon,
+    w_moon,
+    M_moon,
+    # Other model parameters
+    epoch_distance,
+    supersampling_factor,
+    occult_small_threshold,
+    hill_sphere_threshold,
+    time,
+    cache=None,
+):
+    """Same arguments as pandora_flux(), but returns the flux deficits
+    (1 - flux_planet, 1 - flux_moon, 1 - flux_total) as float32 arrays
+    (full length, output cadence; exactly 0 out of transit).
+
+    Half the memory of float64 flux arrays. The deficit, unlike the flux,
+    keeps float32's full relative precision (2^-24 ~ 6e-8 of the deficit
+    itself, i.e. ~1e-9 absolute for a 1 % transit); float32 flux would be
+    quantised to 6e-8 absolute near 1. All computations are float64; only
+    the stored result is rounded. In a chi^2 use (1 - data) - deficit."""
+    if not params_valid(
+        u1, u2, R_star, per_bary, a_bary, r_planet, b_bary, w_bary, ecc_bary,
+        t0_bary, t0_bary_offset, M_planet, r_moon, per_moon, tau_moon,
+        Omega_moon, i_moon, ecc_moon, w_moon, M_moon, epoch_distance,
+        supersampling_factor
+    ):
+        raise ValueError(PARAMS_ERROR)
+    idx, flux_planet_w, flux_moon_w = _window_model(
+        u1, u2, R_star, per_bary, a_bary, r_planet, b_bary, w_bary, ecc_bary,
+        t0_bary, t0_bary_offset, M_planet, r_moon, per_moon, tau_moon,
+        Omega_moon, i_moon, ecc_moon, w_moon, M_moon, epoch_distance,
+        occult_small_threshold, hill_sphere_threshold, time,
+        cache, False
+    )
+    out_idx, fp, fm, ft = _window_cadences(
+        len(time), idx, flux_planet_w, flux_moon_w, supersampling_factor
+    )
+    n_out = _n_out(len(time), supersampling_factor)
+    return (
+        _densify_deficit32(n_out, out_idx, fp),
+        _densify_deficit32(n_out, out_idx, fm),
+        _densify_deficit32(n_out, out_idx, ft),
+    )
+
+
+@jit(cache=True, nopython=True, fastmath=True, parallel=False)
+def pandora_window(
+    u1,
+    u2,
+    R_star,
+    # Planet parameters
+    per_bary,
+    a_bary,
+    r_planet,
+    b_bary,
+    w_bary,
+    ecc_bary,
+    t0_bary,
+    t0_bary_offset,
+    M_planet,
+    # Moon parameters
+    r_moon,
+    per_moon,
+    tau_moon,
+    Omega_moon,
+    i_moon,
+    ecc_moon,
+    w_moon,
+    M_moon,
+    # Other model parameters
+    epoch_distance,
+    supersampling_factor,
+    occult_small_threshold,
+    hill_sphere_threshold,
+    time,
+    cache=None,
+    time_sorted=False
+):
+    """Sparse model output: same arguments as pandora_flux(), returns
+    (idx, flux_planet, flux_moon, flux_total), where idx (int64, ascending)
+    are the output cadences near transit and the float64 fluxes are given
+    there only. All other output cadences have flux exactly 1 (no full-length
+    array is created). pandora_flux() is this, densified.
+    time_sorted=True: time is ascending (not checked); the window is then
+    found by binary search per epoch (same result, no pass over all
+    samples). Wrong results if time is not sorted."""
+    if not params_valid(
+        u1, u2, R_star, per_bary, a_bary, r_planet, b_bary, w_bary, ecc_bary,
+        t0_bary, t0_bary_offset, M_planet, r_moon, per_moon, tau_moon,
+        Omega_moon, i_moon, ecc_moon, w_moon, M_moon, epoch_distance,
+        supersampling_factor
+    ):
+        raise ValueError(PARAMS_ERROR)
+    idx, flux_planet_w, flux_moon_w = _window_model(
+        u1, u2, R_star, per_bary, a_bary, r_planet, b_bary, w_bary, ecc_bary,
+        t0_bary, t0_bary_offset, M_planet, r_moon, per_moon, tau_moon,
+        Omega_moon, i_moon, ecc_moon, w_moon, M_moon, epoch_distance,
+        occult_small_threshold, hill_sphere_threshold, time,
+        cache, time_sorted
+    )
+    return _window_cadences(
+        len(time), idx, flux_planet_w, flux_moon_w, supersampling_factor
+    )

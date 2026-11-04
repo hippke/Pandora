@@ -26,7 +26,7 @@ params.per_moon = 0.3 # [days]
 params.tau_moon = 0.07  # [0..1]
 params.Omega_moon = 0  # [0..180]
 params.i_moon = 80  # [0..180]
-params.e_moon = 0.9  # [0..1]
+params.ecc_moon = 0.1  # [0..1]
 params.w_moon = 20  # [deg]
 params.M_moon = 0.05395 * params.M_planet   # [0..1]
 
@@ -36,7 +36,7 @@ params.epoch_duration = 0.6  # 5  # [days]
 params.cadences_per_day = 250  # [int]
 params.epoch_distance = 365.26   # [days]
 params.supersampling_factor = 1  # [int]
-params.occult_small_threshold = 0.1  # [0..1]
+params.occult_small_threshold = 0  # 0: exact moon occultation (bug #9)
 params.hill_sphere_threshold = 1.2
 
 # Obtain time grid
