@@ -2607,7 +2607,7 @@
    }
   },
   "sun_jupiter_neptunemoon_kepler_lc_ssf3_nocache": {
-   "description": "Sun/Jupiter/Neptune-sized moon ('binary planet', P=2 d), Kepler LC with 3x supersampling, no cache (both via occult_hybrid), t0_bary_offset=0.02 d, drift; mutual eclipse during ingress (limb).",
+   "description": "Sun/Jupiter/Neptune-sized moon ('binary planet', P=2 d), Kepler LC with 3x supersampling, no cache (both via occult_hybrid), t0_bary_offset=0.02 d, drift, numerical_grid=51; mutual eclipse during ingress (limb).",
    "params": {
     "R_star": 696342000.0,
     "u1": 0.4089,
@@ -3476,5 +3476,6 @@
    }
   }
  },
+ "note_2026_10_13": "cleanup: cases 11/12 (pixelmap) removed; numerical_grid / eclipse_method removed from the case parameters; fingerprints of the other cases unchanged (from 430f8fc)",
  "verified_with": "pandoramoon 2.0 (PyPI wheel), numpy 2.5.4, numba 0.68.1, Python 3.12.3, 2026-11-04"
 }

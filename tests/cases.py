@@ -232,7 +232,9 @@ def build_cases():
     cases.append(_finish("sun_jupiter_neptunemoon_kepler_lc_ssf3_nocache",
         "Sun/Jupiter/Neptune-sized moon ('binary planet', P=2 d), Kepler LC with 3x "
         "supersampling, no cache (both via occult_hybrid), t0_bary_offset=0.02 d, "
-        "drift; mutual eclipse during ingress (limb).", c))
+        "drift, numerical_grid=51; mutual eclipse during ingress (limb).", c))
+
+    # (cases 11 and 12 covered the legacy pixel-raster eclipse_method='pixelmap', removed in 2026-10)
 
     # 13. Flux-only entry point pandora_flux() (P1 sample culling), as case 10
     #     but with 3x wider epoch windows, so that ~2/3 of the samples lie
@@ -294,28 +296,30 @@ def run_case(c):
     coordinates of planet and moon."""
     p = _params(c)
     t_super = pandora.time(p).grid()
-    args = (
-        c["u1"], c["u2"], c["R_star"],
-        c["per_bary"], c["a_bary"], c["r_planet"], c["b_bary"], c["w_bary"],
-        c["ecc_bary"], c["t0_bary"], c["t0_bary_offset"], c["M_planet"],
-        c["r_moon"], c["per_moon"], c["tau_moon"], c["Omega_moon"], c["i_moon"],
-        c["ecc_moon"], c["w_moon"], c["M_moon"],
-        c["epoch_distance"], c["supersampling_factor"],
-        c["occult_small_threshold"], c["hill_sphere_threshold"],
-        t_super)
-    if c["use_cache"]:
-        # the float32 occultation cache of Pandora <= 1.x (moon_model.light_curve() no longer uses it in 2.0);
-        # it is passed explicitly so that these cases keep covering the cached small-moon path
-        from pandoramoon.occult import create_occult_cache
-        fp, fm, ft, xp, yp, xm, ym = pandora.pandora(*args, create_occult_cache(c["u1"], c["u2"], dim=300))
-    else:
-        fp, fm, ft, xp, yp, xm, ym = pandora.pandora(*args)
+    # use_cache: the float32 occultation cache (create_occult_cache, dim 300) passed to pandora(), as
+    # moon_model.light_curve() did until 2026-10 (light_curve() now uses the exact path: unit test
+    # test_light_curve_exact)
+    if True:
+        kw = {}
+        args = (
+            c["u1"], c["u2"], c["R_star"],
+            c["per_bary"], c["a_bary"], c["r_planet"], c["b_bary"], c["w_bary"],
+            c["ecc_bary"], c["t0_bary"], c["t0_bary_offset"], c["M_planet"],
+            c["r_moon"], c["per_moon"], c["tau_moon"], c["Omega_moon"], c["i_moon"],
+            c["ecc_moon"], c["w_moon"], c["M_moon"],
+            c["epoch_distance"], c["supersampling_factor"],
+            c["occult_small_threshold"], c["hill_sphere_threshold"], t_super)
+        if c["use_cache"]:
+            fp, fm, ft, xp, yp, xm, ym = pandora.pandora(
+                *args, pandora.create_occult_cache(c["u1"], c["u2"], dim=300))
+        else:
+            fp, fm, ft, xp, yp, xm, ym = pandora.pandora(*args, **kw)
         if c.get("entry") == "pandora_flux":
             # fluxes from the flux-only entry point; coordinates from pandora()
-            fp, fm, ft = pandora.pandora_flux(*args)
+            fp, fm, ft = pandora.pandora_flux(*args, **kw)
         elif c.get("entry") == "pandora_deficit":
             # float32 deficits -> flux (float64); coordinates from pandora()
-            fp, fm, ft = (1.0 - d.astype(np.float64) for d in pandora.pandora_deficit(*args))
+            fp, fm, ft = (1.0 - d.astype(np.float64) for d in pandora.pandora_deficit(*args, **kw))
     ssf = c["supersampling_factor"]
     t_out = resample(t_super, ssf) if ssf > 1 else t_super
     return dict(time=t_out, flux_planet=np.asarray(fp), flux_moon=np.asarray(fm),

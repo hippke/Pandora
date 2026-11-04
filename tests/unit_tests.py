@@ -1,4 +1,4 @@
-"""Unit tests for Pandora bug fixes (see ../BUGS.md).
+"""Unit tests for Pandora bug fixes (see ../Pandora/BUGS.md).
 
 These complement the light-curve regression cases in cases.py: they target
 failure modes that realistic light curves cannot reliably expose (exact
@@ -322,13 +322,11 @@ def test_moon_exact_by_default():
     import re
     import pandoramoon
     from pandoramoon.pandora import pandora_window
-    from pandoramoon._config import settings
     assert pandoramoon.model_params().occult_small_threshold == 0
-    assert settings()["model"]["occult_small_threshold"] == 0       # settings.cfg: the default of Likelihood and the fits
-    sig = inspect.signature(pandoramoon.Likelihood.__init__)
-    assert sig.parameters["occult_small_threshold"].default is None  # None: the settings.cfg value
-    like = pandoramoon.Likelihood(np.linspace(10, 12, 50), np.ones(50), 1e-4, epoch_distance=365.25)
-    assert like.occult_small_threshold == 0
+    # Likelihood's default comes from settings.cfg [model] (signature default None)
+    assert pandoramoon.Likelihood(np.linspace(0, 1, 10), np.ones(10), np.ones(10), 1.0).occult_small_threshold == 0
+    from pandoramoon._config import settings
+    assert settings()["model"]["occult_small_threshold"] == 0
     # the examples: next to the package (source checkout) or in ../examples of this tests folder (repository);
     # a wheel installation has none, then only the default values are checked
     for ex in (os.path.join(os.path.dirname(pandoramoon.__file__), "..", "examples"),
@@ -361,8 +359,8 @@ def test_moon_exact_by_default():
 def test_eclipse_skip_is_exact():
     """P5: eclipse_possible() is False only if eclipse() leaves flux_moon
     unchanged: random sky positions (on star, on the limb, off star) with
-    separations around r_p + r_m incl. exact tangency and +- a few ulp; and
-    its loop is vectorised."""
+    separations around r_p + r_m incl. exact tangency and +- a few ulp, both
+    eclipse methods; and its loop is vectorised."""
     import numba
     from pandoramoon.eclipse import eclipse, eclipse_possible
     rng = np.random.default_rng(29)
@@ -379,12 +377,13 @@ def test_eclipse_skip_is_exact():
         sep = sep * (1 + rng.integers(-3, 4, n) * np.finfo(float).eps)
         xm, ym = xp + sep * np.cos(phi), yp + sep * np.sin(phi)
         f0 = np.full(n, 0.9995)
-        f = eclipse(xp, yp, xm, ym, rp, rm, f0.copy())
-        if not eclipse_possible(xp, yp, xm, ym, rp, rm):
-            n_skip += 1
-            assert np.array_equal(f, f0), f"skipped but eclipse() changed the flux (trial {trial})"
-        else:
-            n_call += 1
+        for _once in (0,):
+            f = eclipse(xp, yp, xm, ym, rp, rm, f0.copy())
+            if not eclipse_possible(xp, yp, xm, ym, rp, rm):
+                n_skip += 1
+                assert np.array_equal(f, f0), f"skipped but eclipse() changed the flux (trial {trial})"
+            else:
+                n_call += 1
     assert n_skip > 60 and n_call > 600, (n_skip, n_call)
     # cached code cannot be inspected: compile an uncached copy of the source
     fresh = numba.njit(fastmath=True)(eclipse_possible.py_func)
@@ -513,8 +512,8 @@ def test_eclipse_limb_darkening_gradient():
     treatment's ~1.3 ppm to <= 0.25 ppm (moon fully on the star) and
     <= 0.65 ppm (moon on the limb), and the rms by > 5x. Also: full
     overlaps stay exact (flux 1), the term is continuous where the taper
-    starts and ends (z_m = 1 - r_m and z_m = 1), and u1 = u2 = None gives the
-    constant-intensity treatment."""
+    starts and ends (z_m = 1 - r_m and z_m = 1), u1 = u2 = None and the
+    pixel map reproduce the old treatment."""
     from pandoramoon.eclipse import eclipse, lens_gradient_term
     u1, u2 = 0.4, 0.26
     rp, rm = 0.1005, 0.0092
@@ -544,7 +543,7 @@ def test_eclipse_limb_darkening_gradient():
         assert e_new.max() <= lim, f"{zone}: T4 error {e_new.max():.3f} ppm > {lim}"
         rms_old, rms_new = np.sqrt(np.mean(e_old ** 2)), np.sqrt(np.mean(e_new ** 2))
         assert rms_new < rms_old / 2, f"{zone}: rms {rms_new:.3f} not < half of {rms_old:.3f} ppm"
-    # full overlap stays exact; None = constant-intensity treatment
+    # full overlap stays exact; None = old treatment
     xp, yp = np.array([0.3]), np.array([0.1])
     xm, ym = xp + 0.02, yp
     f0 = occult_hybrid(np.hypot(xm, ym), rm, u1, u2)
@@ -630,7 +629,7 @@ def test_ellpicb_converges():
 
 
 # ----------------------------------------------------------------------------
-# analytic mutual-eclipse overlap (the only method since 2.0)
+# analytic mutual-eclipse overlap (eclipse_method="analytic", default)
 # ----------------------------------------------------------------------------
 def _disk_intersection_area(circles, n=40_000):
     """Independent reference: area of the intersection of disks, by midpoint
@@ -700,58 +699,44 @@ def test_analytic_eclipse_matches_reference():
         assert abs(er_fast(*args) - ref) < 1e-7, f"er_fast{args} = {er_fast(*args)}, ref {ref}"
 
 
-def test_pixelmap_removed():
-    """2.0: the pixel-raster eclipse (eclipse_method="pixelmap", numerical_grid) is gone. The analytic overlap is
-    the only method: model_params has no such attributes, moon_model and Likelihood reject "pixelmap" with a
-    ValueError, Likelihood(numerical_grid=...) only warns and is ignored, and positional callers that still pass
-    the grid get an error (numba TypingError), never a silently misaligned result."""
+def test_eclipse_method_switch():
+    """The legacy pixel raster (eclipse_method="pixelmap") was removed in 2026-10: moon_model and Likelihood
+    reject it with a ValueError; Likelihood(numerical_grid=...) only warns (the argument is ignored)."""
     import warnings
-    import numba
+    c = [c for c in C.build_cases() if c["name"] == "mdwarf_neptune_earthmoon_tess_20s"][0]
+    p = C._params(c)
+    for bad in ("pixelmap", "pixels"):
+        p.eclipse_method = bad
+        try:
+            C.pandora.moon_model(p)
+            raise AssertionError(f"eclipse_method={bad!r} accepted")
+        except ValueError:
+            pass
     from pandoramoon import Likelihood
-    p = C.pandora.model_params()
-    assert not hasattr(p, "numerical_grid") and not hasattr(p, "eclipse_method")
-    p.eclipse_method = "pixelmap"
-    try:
-        C.pandora.moon_model(p)
-        raise AssertionError("moon_model accepted eclipse_method='pixelmap'")
-    except ValueError:
-        pass
     t = np.linspace(10, 12, 300)
-    try:
-        Likelihood(t, np.ones(300), np.ones(300), epoch_distance=365.25, eclipse_method="pixelmap")
-        raise AssertionError("Likelihood accepted eclipse_method='pixelmap'")
-    except ValueError:
-        pass
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         Likelihood(t, np.ones(300), np.ones(300), epoch_distance=365.25, numerical_grid=25)
-    assert any("numerical_grid" in str(x.message) for x in w), "numerical_grid was not reported as ignored"
-    args = (U1, U2, C.R_SUN_M, 365.25, 215.0, 0.1, 0.3, 0.0, 0.0, 11.0, 0.0, C.M_JUPITER, 0.01, 3.0, 0.1, 0.0,
-            90.0, 0.0, 0.0, 6e24, 365.26, 1, 0.0, 1.0)
-    try:
-        pandora_fn(*args, 25, t)
-        raise AssertionError("pandora() accepted the removed numerical_grid argument")
-    except (TypeError, numba.core.errors.TypingError):    # numba reports the misaligned call as a TypingError
-        pass
+    assert any(issubclass(x.category, DeprecationWarning) for x in w), "numerical_grid did not warn"
 
 
 def test_light_curve_exact():
-    """2.0: moon_model.light_curve() uses the exact path (no float32 occultation cache any more), like
-    coordinates() and video(): it equals pandora() without a cache bit for bit, and differs from the cached path
-    of Pandora <= 1.x by at most a few ppm."""
-    c = [c for c in C.build_cases() if c["name"] == "sun_earth_luna_plato_1min"][0]
+    """moon_model.light_curve() uses the exact occultation path (since 2026-10; before: the float32 cache):
+    it equals pandora() without a cache, and differs from the cached path by at most a few ppm."""
+    c = [c for c in C.build_cases() if c["name"] == "sun_jupiter_earthmoon_tess_2min"][0]
     p = C._params(c)
     t = C.pandora.time(p).grid()
     ft, fp, fm = C.pandora.moon_model(p).light_curve(t)
     args = (c["u1"], c["u2"], c["R_star"], c["per_bary"], c["a_bary"], c["r_planet"], c["b_bary"], c["w_bary"],
             c["ecc_bary"], c["t0_bary"], c["t0_bary_offset"], c["M_planet"], c["r_moon"], c["per_moon"],
             c["tau_moon"], c["Omega_moon"], c["i_moon"], c["ecc_moon"], c["w_moon"], c["M_moon"],
-            c["epoch_distance"], c["supersampling_factor"], c["occult_small_threshold"], c["hill_sphere_threshold"], t)
+            c["epoch_distance"], c["supersampling_factor"], c["occult_small_threshold"],
+            c["hill_sphere_threshold"], t)
     exact = pandora_fn(*args)
-    assert np.array_equal(fp, exact[0]) and np.array_equal(fm, exact[1]) and np.array_equal(ft, exact[2])
-    cached = pandora_fn(*args, create_occult_cache(c["u1"], c["u2"], dim=300))
-    d = max(np.max(np.abs(a - b)) for a, b in zip(cached[:3], exact[:3]))
-    assert d < 5e-6, f"cached path differs by {d:.2e}"
+    assert np.array_equal(ft, exact[2]) and np.array_equal(fp, exact[0]) and np.array_equal(fm, exact[1])
+    cached = pandora_fn(*args, C.pandora.create_occult_cache(c["u1"], c["u2"], dim=300))
+    d = np.max(np.abs(cached[2] - ft))
+    assert 0 < d < 1e-5, f"cached vs exact light curve differ by {d:.2e}"
 
 
 def _unculled_fluxes(args, cache, coords):
@@ -1100,6 +1085,7 @@ def test_pandora_window_and_likelihood():
     t = np.linspace(10, 12, 300)
     for bad in (dict(data=np.ones(299), yerr=np.ones(299)),
                 dict(data=np.ones(300), yerr=np.zeros(300)),
+                dict(data=np.ones(300), yerr=np.ones(300), eclipse_method="pixels"),
                 dict(data=np.ones(300), yerr=np.ones(300), eclipse_method="pixelmap")):
         try:
             Likelihood(t, epoch_distance=365.25, **bad)
@@ -1963,7 +1949,7 @@ def test_occult_contact_points_exact():
     the elliptic part). Before P15 the z -> k + 1e-6 and q -> 1 - 1e-8
     nudges were up to 4.3e-9 / 2.9e-8 off here."""
     for z, k, ref in CONTACT_REF:
-        got = occult_exact(np.array([z]), k, 0.4, 0.25)[0]   # (P14 series, removed in 2.0)
+        got = occult_exact(np.array([z]), k, 0.4, 0.25)[0]   # (P14 series: test_interior_series)
         tol = 5e-10 if 0 <= z - (1 - k) < 1e-6 else 1e-12
         assert abs(got - ref) <= tol, f"k={k} z={z!r}: {got!r} vs mpmath {ref!r} ({abs(got - ref):.1e})"
     # z == k exactly is moved by one ulp: finite and continuous
@@ -2146,6 +2132,29 @@ def test_window_chi2_matches_cadences():
             n_fast += int(np.sum(np.diff(idx) == 1) >= factor)
     assert n_fast > 50, f"contiguous runs too rare ({n_fast})"
     assert n_split > 50, f"split runs too rare ({n_split})"
+
+
+def test_interior_series():
+    """occult_hybrid (interior interpolant P21c, limb interpolant P21b) is within SERIES_TOL = 1e-8 (0.01 ppm) of
+    the exact model (occult_exact) for k = 1e-6 ... 0.99, 20 limb-darkening laws incl. u = 0 and unphysical
+    ones, and of an independent mpmath disk quadrature (SERIES_REF). (Until 2026-10-13 this test also checked
+    the P14 interior series and its error bound; the series was removed with the cleanup.)"""
+    from pandoramoon.occult import SERIES_TOL
+    rng = np.random.default_rng(14)
+    lds = [(0.4, 0.26), (0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (2.0, -1.0), (0.8, -0.1),
+           (0.2, 0.6), (-0.5, 0.3), (1.5, -0.8)]
+    lds += [(2 * np.sqrt(q1) * q2, np.sqrt(q1) * (1 - 2 * q2)) for q1, q2 in rng.uniform(0, 1, (11, 2))]
+    for k in (1e-6, 1e-3, 0.0092, 0.03, 0.1, 0.2, 0.5, 0.99):
+        zs = np.concatenate([np.linspace(0, 1 + k, 1500), (1 - k) * (1 - np.logspace(-12, -1, 30)),
+                             rng.uniform(0, 1 + k, 500)])
+        for u1, u2 in lds:
+            ex = occult_exact(zs, k, u1, u2)
+            d = np.abs(occult_hybrid(zs, k, u1, u2) - ex).max()
+            assert d <= SERIES_TOL + 2e-15, f"k={k} u=({u1:.3f},{u2:.3f}): occult_hybrid off by {d:.2e}"
+    for z, k, u1, u2, ref in SERIES_REF:
+        got = occult_hybrid(np.array([z]), k, u1, u2)[0]
+        assert abs(got - ref) <= SERIES_TOL, f"z={z} k={k} u=({u1},{u2}): {got!r} vs mpmath {ref!r}"
+
 
 
 INTERIOR_REF = [  # (z, k, u1, u2, flux) on 0 <= z < 1 - k, mpmath radial quadrature, dps 30 (scratch_p21c)

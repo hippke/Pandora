@@ -29,7 +29,11 @@ Tests:
   T10 (Round 20/21) the n_live escalation of nss.fit: a compact mode with 99.9 % of the mass in 10 % of the volume
      (8-d, lnZ = 0): runs that miss it are ~7 nats low with a lower maxL; fit doubles n_live (not nsteps), flags the
      result multimodal and recovers lnZ; the unimodal known-Z problem of T7 does not escalate.
-  T11 (removed in 2.0) posterior repartitioning: NestedSampler(repartition=...) no longer exists.
+  T11 (Round 21) posterior repartitioning: removed with the option (Round 23 decision b; in git).
+  T13 (2026-10-14) planet-only evidence by importance sampling: agrees with the full nested fit (lnZ, posterior) with
+     < 1/10 of the calls; a failed check falls back to the nested fit.
+  T14 (2026-10-14) a/R* prior: default_priors' wide default; with a wrong narrow prior a false moon and the
+     prior-edge warning, with the new default neither.
   T12 (Round 22) the search API: resample_likelihood = a directly supersampled Likelihood; NestedSampler
      supersampling="auto" (30-min data -> 5 sub-exposures) and None; default_priors gives valid models; detect()
      flags the injected moon (candidate, jackknife passed) and not a planet-only light curve; the jackknife of two
@@ -72,6 +76,7 @@ def make_data(seed=0):
     rng = np.random.default_rng(seed)
     data = flux + rng.normal(0, 500e-6, len(t))
     like = pandora.Likelihood(t, data, np.full(len(t), 500e-6), epoch_distance=365.26, hill_sphere_threshold=1.0)
+    like.yerr_input = np.full(len(t), 500e-6)          # for T6's child process (exact copy of the data)
     return like
 
 
@@ -158,7 +163,7 @@ def t3(like):
     rp = Reparam(360.25, 370.25, p_max=50.0, p_lo=m.p_lo, e_c=m.e_c)
     U = rng.uniform(size=(2000, m.ndim))
     th, lw = m.native(U)
-    c = list(D[19])    # mp_c, see the D layout comment in pandoramoon/sampling.py
+    c = list(D[19])        # mp_c (cube indices of phi_c, delta, u_m); see the D layout in sampling.py
     dmax = 0.0
     for i in range(len(U)):
         pm, tau, lwr = rp.to_native(th[i, 3], th[i, 9], th[i, 10], U[i, c[0]], U[i, c[1]], U[i, c[2]], m.e_c)
@@ -195,7 +200,8 @@ def t5(like):
     d = tempfile.mkdtemp(prefix="pandora_t5_")
     try:
         pri = {k: v for k, v in PRIORS.items()}
-        s = NestedSampler(like, pri, model="planet", log_dir=d, resume="overwrite", verbose=False, planet_evidence="nested")
+        s = NestedSampler(like, pri, model="planet", log_dir=d, resume="overwrite", verbose=False,
+                          planet_evidence="nested")
         r = s.run(accuracy="medium")
         keys = ("logz", "logzerr", "samples", "weighted_samples", "posterior", "maxlikelihood", "ncall", "paramnames",
                 "ess", "H", "passed")
@@ -215,17 +221,12 @@ def t5(like):
         check(os.path.exists(os.path.join(d, "plots", "run.pdf")), "T5 plot_run() writes plots/run.pdf")
         import matplotlib.pyplot as plt
         plt.close("all")
-        s2 = NestedSampler(like, pri, model="planet", log_dir=d, resume="resume", verbose=False, planet_evidence="nested")
+        s2 = NestedSampler(like, pri, model="planet", log_dir=d, resume="resume", verbose=False,
+                           planet_evidence="nested")
         r2 = s2.run(accuracy="medium")
         check(r2["logz"] == r["logz"] and r2["runs"] == r["runs"],
               f"T5 resume of a finished fit: logZ {r2['logz']:.4f} (was {r['logz']:.4f}), {r2['runs']} runs, "
               f"same: {r2['logz'] == r['logz']}")
-        # the default planet-only evidence (importance sampling, planet_evidence="is") agrees with the nested-sampling fit
-        r_is = NestedSampler(like, pri, model="planet", verbose=False).run(accuracy="medium")
-        tol = 3 * math.hypot(r["logzerr"], r_is["logzerr"]) + 0.2
-        check(r_is["passed"] and abs(r_is["logz"] - r["logz"]) < tol,
-              f"T5 planet_evidence='is' (default): logZ {r_is['logz']:.3f} +- {r_is['logzerr']:.3f} vs nested "
-              f"{r['logz']:.3f} +- {r['logzerr']:.3f} (tolerance {tol:.2f}), passed {r_is['passed']}, {r_is['wall']:.0f} s")
         # truth inside the posterior (r_planet 0.1, b 0.3, a 215)
         p = r["posterior"]
         j = r["paramnames"].index("r_planet")
@@ -348,6 +349,65 @@ def t10():
           f"T10 unimodal known-Z problem: no n_live escalation ({u['n_nlive_escalations']}), multimodal {u['multimodal']}")
 
 
+def t13(like):
+    """planet-only evidence by importance sampling (2026-10-14): agrees with the full nested fit; a failed check falls
+    back to the nested fit"""
+    from pandoramoon._config import settings
+    th = min(8, os.cpu_count() or 1)
+    ri = NestedSampler(like, PRIORS, model="planet", verbose=False, threads=th, seed=5).run(accuracy="high",
+                                                                                          progress=False)
+    rn = NestedSampler(like, PRIORS, model="planet", verbose=False, threads=th, seed=5,
+                       planet_evidence="nested").run(accuracy="high", progress=False)
+    d = ri["logz"] - rn["logz"]
+    s = math.hypot(ri["logzerr"], rn["logzerr"])
+    j = ri["paramnames"].index("r_planet")
+    dr = abs(ri["posterior"]["median"][j] - rn["posterior"]["median"][j]) / rn["posterior"]["stdev"][j]
+    check(ri.get("method") == "importance" and abs(d) < 3 * s + 0.05 and dr < 0.2 and ri["ncall"] < rn["ncall"] / 10,
+          f"T13 planet lnZ by importance sampling {ri['logz']:.3f} +- {ri['logzerr']:.3f} vs nested {rn['logz']:.3f} +- "
+          f"{rn['logzerr']:.3f} ({d / s:+.1f} sigma), r_planet median differs by {dr:.2f} sd, calls {ri['ncall']:,} vs "
+          f"{rn['ncall']:,}")
+    S = settings()["planet_is"]
+    old = S["ess_min"]
+    S["ess_min"] = 1e12                       # force a failed check
+    try:
+        rf = NestedSampler(like, PRIORS, model="planet", verbose=False, threads=th, seed=5).run(accuracy="medium",
+                                                                                              progress=False)
+    finally:
+        S["ess_min"] = old
+    check(rf.get("method", "nested") == "nested" and rf["runs"] >= 8,
+          f"T13 failed importance-sampling check -> nested-sampling fit ({rf['runs']} runs, lnZ {rf['logz']:.3f})")
+
+
+def t14():
+    """a/R* prior (2026-10-14): default_priors' wide log-uniform default; with a wrong catalogue star (true a = 0.6 x
+    Kepler's law, no moon) the old narrow prior gives a false dlnZ and the prior-edge warning of detect; the new
+    default neither"""
+    from pandoramoon import detect, default_priors
+    from pandoramoon.search import model_flux
+    from pandoramoon.kernel import PLANET_ONLY_MOON
+    from pandoramoon.sampling import LogUniform as _LU
+    from pandoramoon.constants import G, DAY, R_SUN, M_SUN, M_JUP
+    P, t0 = 200.0, 10.0
+    ak = (G * (M_SUN + M_JUP) * (P * DAY) ** 2 / (4 * math.pi ** 2)) ** (1 / 3) / R_SUN
+    pr = default_priors(t0, P, 0.1)
+    check(isinstance(pr["a_bary"], _LU) and abs(pr["a_bary"].lo / ak - 0.4) < 1e-6 and abs(pr["a_bary"].hi / ak - 2.5) < 1e-6,
+          f"T14 default a_bary prior log-uniform 0.4-2.5 x Kepler's law ({pr['a_bary']})")
+    t = np.concatenate([np.arange(t0 + k * P - 1.5, t0 + k * P + 1.5, 1 / 48) for k in range(4)])
+    p = dict(u1=0.4, u2=0.25, R_star=R_SUN, per_bary=P, a_bary=0.6 * ak, r_planet=0.1, b_bary=0.3, w_bary=0.0,
+             ecc_bary=0.0, t0_bary=t0, t0_bary_offset=0.0, M_planet=M_JUP)
+    p.update(zip(S.MOON_NAMES, PLANET_ONLY_MOON))
+    lk0 = pandora.Likelihood(t, np.ones_like(t), np.ones_like(t), epoch_distance=P)
+    f = model_flux(lk0, p) + np.random.default_rng(3).normal(0, 300e-6, len(t))
+    like = pandora.Likelihood(t, f, np.full(len(t), 300e-6), epoch_distance=P)
+    old = detect(like, default_priors(t0, P, 0.1, a_bary=(0.977 * ak, 1.023 * ak)), recall=0.9, seed=1)
+    new = detect(like, pr, recall=0.9, seed=1)
+    w_old = [w for w in old["warnings"] if "a_bary" in w]
+    w_new = [w for w in new["warnings"] if "a_bary" in w]
+    check(len(w_old) >= 1 and old["dlnz"] > 3 and not w_new and new["dlnz"] < 3,
+          f"T14 wrong star (no moon): old narrow prior -> a_bary edge warning ({len(w_old)}), false dlnZ {old['dlnz']:+.1f}; "
+          f"new default -> warnings {len(w_new)}, dlnZ {new['dlnz']:+.1f}")
+
+
 def t12(like):
     import pandoramoon as P
     from pandoramoon import search as SR
@@ -456,11 +516,17 @@ def t8(like):
 
 T6_CHILD = """
 import sys
+import numpy as np
 sys.path.insert(0, %r)
+import pandoramoon as pandora
 import test_sampling as T
 from pandoramoon import NestedSampler
-NestedSampler(T.make_data(), T.PRIORS, model="planet", log_dir=%r, resume="overwrite", verbose=False,
-              threads=2, planet_evidence="nested").run(accuracy="medium")
+# the parent's data from a file, not regenerated: simulated flux can differ in the last bit between processes whose
+# numba code was compiled fresh vs loaded from the cache (fastmath), and the resume compares the data's hash
+z = np.load(%r)
+like = pandora.Likelihood(z["time"], z["data"], z["yerr"], epoch_distance=365.26, hill_sphere_threshold=1.0)
+NestedSampler(like, T.PRIORS, model="planet", log_dir=%r, resume="overwrite", verbose=False,
+              planet_evidence="nested", threads=2).run(accuracy="medium")
 """
 
 
@@ -470,7 +536,9 @@ def t6(like):
     d = tempfile.mkdtemp(prefix="pandora_t6_")
     try:
         here = os.path.dirname(os.path.abspath(__file__))
-        pr = subprocess.Popen([sys.executable, "-c", T6_CHILD % (here, d)])
+        dfile = os.path.join(d, "t6_data.npz")
+        np.savez(dfile, time=like.time, data=like.data, yerr=like.yerr_input)
+        pr = subprocess.Popen([sys.executable, "-c", T6_CHILD % (here, dfile, d)])
         runs = os.path.join(d, "runs")
         t0 = _t.time()
         while _t.time() - t0 < 600:
@@ -492,7 +560,8 @@ def t6(like):
               f"seeds after the resume (stored indices now {sorted(idx_now)[:12]}...)")
         d2 = tempfile.mkdtemp(prefix="pandora_t6b_")
         ref = NestedSampler(like, PRIORS, model="planet", log_dir=d2, resume="overwrite", verbose=False,
-                            threads=2, planet_evidence="nested").run(accuracy="medium")
+                            planet_evidence="nested",
+                            threads=2).run(accuracy="medium")
         shutil.rmtree(d2, ignore_errors=True)
         check(len(stored) >= 3 and kept and r["passed"],
               f"T6 crash after {len(stored)} stored runs: resumed, the stored runs kept and used, {len(now)} runs "
@@ -519,6 +588,9 @@ if __name__ == "__main__":
         t9()
         t10()
     t12(like)
+    if "--quick" not in sys.argv:
+        t13(like)
+        t14()
     t8(like)
     print(f"\n{'OK' if not FAIL else 'FAILED'}: {len(FAIL)} failing")
     sys.exit(1 if FAIL else 0)

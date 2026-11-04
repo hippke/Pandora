@@ -34,11 +34,6 @@ def _git_commit(path):
         return "unknown"
 
 
-def _version():
-    import pandoramoon.version as v
-    return "v" + v.PANDORA_VERSIONING + (" (" + _git_commit(C._repo) + ")" if C._repo else " (installed)")
-
-
 def case_params(c):
     return {k: v for k, v in c.items() if k != "description"}
 
@@ -94,7 +89,7 @@ def main():
     cases = C.build_cases()
     out = dict(
         generated=datetime.datetime.now().isoformat(timespec="seconds"),
-        pandora_commit=_version(),
+        pandora_commit=_git_commit(C._repo),
         numpy=np.__version__,
         numba=__import__("numba").__version__,
         python=sys.version.split()[0],
