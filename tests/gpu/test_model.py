@@ -103,7 +103,8 @@ def test_loglike_tutorial():
     return "; ".join(out)
 
 
-def _system_like(per, epochs, cad_per_day, ss, t0, r_p, a_b, M_p, r_m, per_m, M_m, seed=1, noise=300e-6, window=None):
+def _system_like(per, epochs, cad_per_day, ss, t0, r_p, a_b, M_p, r_m, per_m, M_m, seed=1, noise=300e-6, window=None,
+                 ecc_moon=0.0, w_moon=0.0):
     """a synthetic light curve (model + white noise) of a planet+moon system, cut to windows around the transits,
     and its supersampled Likelihood"""
     import pandoramoon as pandora
@@ -111,8 +112,8 @@ def _system_like(per, epochs, cad_per_day, ss, t0, r_p, a_b, M_p, r_m, per_m, M_
     p.R_star = 696_342_000; p.u1 = 0.45; p.u2 = 0.2
     p.per_bary = per; p.a_bary = a_b; p.r_planet = r_p; p.b_bary = 0.25; p.t0_bary = t0; p.t0_bary_offset = 0.003
     p.M_planet = M_p; p.w_bary = 0; p.ecc_bary = 0
-    p.r_moon = r_m; p.per_moon = per_m; p.tau_moon = 0.3; p.Omega_moon = 10; p.i_moon = 88; p.ecc_moon = 0
-    p.w_moon = 0; p.M_moon = M_m
+    p.r_moon = r_m; p.per_moon = per_m; p.tau_moon = 0.3; p.Omega_moon = 10; p.i_moon = 88; p.ecc_moon = ecc_moon
+    p.w_moon = w_moon; p.M_moon = M_m
     p.epochs = epochs; p.epoch_duration = window or 2.0; p.cadences_per_day = cad_per_day; p.epoch_distance = per
     p.occult_small_threshold = 0; p.hill_sphere_threshold = 1.0
     p.supersampling_factor = ss
@@ -278,8 +279,41 @@ def test_transform():
     return "; ".join(out)
 
 
+def test_eccentric_moon():
+    """eccentric moon orbits (e = 0.1 ... 0.9, several w): 3 transits of a Jupiter with a moon, 10-min cadence, ss 3;
+    points near the truth with e and w perturbed too"""
+    from pandoramoon.gpu import GPULikelihood
+    import tutorial_data as td
+    out = []
+    worst = 0.0
+    for e, w in ((0.1, 30.0), (0.3, 120.0), (0.6, 250.0), (0.9, 75.0)):
+        p, like = _system_like(365.25, 3, 144, 3, 11.0, 0.1, 215.0, 1.9e27, 0.03, 8.0, 1e26, window=3.0,
+                               ecc_moon=e, w_moon=w)
+        rng = np.random.default_rng(7)
+        th0 = td.truth_theta(p)
+        TH = np.repeat(th0[None, :], 400, axis=0)
+        sc = np.zeros(20)
+        sc[10] = 0.003; sc[12] = 0.002; sc[13] = 0.05; sc[14] = 0.05; sc[15] = 5; sc[16] = 2; sc[19] = 2e25
+        sc[17] = 0.02 * (1 - e); sc[18] = 10
+        TH = TH + rng.normal(size=TH.shape) * sc
+        TH[:, 17] = np.clip(TH[:, 17], 0.0, 0.9)
+        TH[:, [12, 19]] = np.abs(TH[:, [12, 19]])
+        TH[0] = th0
+        G = GPULikelihood(like, t0_ref=p.t0_bary)
+        ref = np.array([like(*th) for th in TH])
+        g = G(TH)
+        fin = np.isfinite(ref)
+        assert np.array_equal(fin, np.isfinite(g)), (e, "-inf pattern differs")
+        d, b = np.abs(g - ref)[fin], _bound(like, TH[fin])
+        near = ref[fin] > ref[fin].max() - 50
+        assert d[near].max() <= 0.02 and np.all(d <= b), (e, w, d[near].max(), np.max(d / b))
+        worst = max(worst, np.max(d / b))
+        out.append(f"e={e}: near max {d[near].max():.1e}")
+    return "; ".join(out) + f"; max |dlogL| / bound {worst:.2f}"
+
+
 TESTS = [test_deficit, test_er3, test_loglike_tutorial, test_long_kepler, test_long_baseline, test_edge_cases,
-         test_transform]
+         test_transform, test_eccentric_moon]
 
 if __name__ == "__main__":
     if not _gpu():

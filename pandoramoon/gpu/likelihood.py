@@ -4,8 +4,8 @@
     G = GPULikelihood(like, t0_ref=t0_bary)       # like: a pandoramoon.Likelihood (as the sampler uses it)
     logl = G(theta)                                # theta: (n, 20) Pandora parameters (pandora_loglike's order)
 
-Scope of v1 (anything else raises ValueError; the CPU path handles it): circular planet and moon orbits
-(ecc_bary = ecc_moon = 0), sorted time, no occultation cache, occult_small_threshold = 0 (exact moon transit),
+Scope (anything else raises ValueError; the CPU path handles it): a circular planet orbit (ecc_bary = 0), a
+moon orbit with ecc_moon <= 0.9, sorted time, no occultation cache, occult_small_threshold = 0 (exact moon transit),
 supersampled time as Likelihood stores it (len(time) = supersampling_factor x cadences), r_planet and r_moon
 inside the occultation tables' k-range.
 """
@@ -16,6 +16,7 @@ from pandoramoon.gpu import _cuda
 # k-ranges of the interpolant tables (occult.LIMB_TAB_*, INT_TAB_*): the GPU has no per-call exact build
 K_MIN = 5e-4
 K_MAX = 0.25
+ECC_MOON_MAX = 0.9
 
 
 def _two_float(x):
@@ -79,8 +80,10 @@ class GPULikelihood:
     def check_theta(self, theta):
         """the v1 scope for a batch of parameter vectors (raises ValueError)"""
         th = np.asarray(theta)
-        if np.any(th[:, 8] != 0) or np.any(th[:, 17] != 0):
-            raise ValueError("GPULikelihood v1: circular orbits only (ecc_bary = ecc_moon = 0)")
+        if np.any(th[:, 8] != 0):
+            raise ValueError("GPULikelihood: circular planet orbits only (ecc_bary = 0)")
+        if np.any(th[:, 17] > ECC_MOON_MAX):
+            raise ValueError(f"GPULikelihood: ecc_moon <= {ECC_MOON_MAX} (validated range of the FP32 Kepler solver)")
         for col, name in ((5, "r_planet"), (12, "r_moon")):
             v = th[:, col]
             on = v > 0

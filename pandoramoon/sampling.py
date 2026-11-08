@@ -1084,7 +1084,8 @@ class NestedSampler:
         kw.update(nss_kw)
         out = {}
         order = [n for n in ("planet", "moon") if n in self.models]
-        for name in order:
+
+        def fit_one(name):
             m = self.models[name]
             path = None
             if self.log_dir is not None:
@@ -1102,7 +1103,7 @@ class NestedSampler:
             if name == "planet" and self.planet_evidence == "is" and not any(m.wrapped):
                 res_is, info = _fit_model_is(m, kw, self.verbose, name, max_weighted=max_weighted_samples)
                 if res_is is not None:
-                    out[name] = res_is
+                    return_value = res_is
                     done = True
                 elif self.verbose:
                     print(f"  {name}: importance sampling not used ({info.get('reason')}): nested-sampling fit",
@@ -1111,8 +1112,21 @@ class NestedSampler:
                 kw_m = kw
                 if self.device == "gpu" and name == "moon":
                     kw_m = dict(kw, backend="gpu", gpu=dict(evaluator=self._gpu_evaluator(m)))
-                out[name] = _fit_model(m, kw_m, store, mode, hs, self.verbose, name, max_weighted=max_weighted_samples,
+                return_value = _fit_model(m, kw_m, store, mode, hs, self.verbose, name, max_weighted=max_weighted_samples,
                                        progress=self.verbose if progress is None else progress, hash_parts=hparts)
+
+            return return_value
+
+        if self.device == "gpu" and order == ["planet", "moon"]:
+            # the planet-only model (CPU) concurrently with the planet+moon model (GPU)
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=1) as ex_pl:
+                f_pl = ex_pl.submit(fit_one, "planet")
+                out["moon"] = fit_one("moon")
+                out["planet"] = f_pl.result()
+        else:
+            for name in order:
+                out[name] = fit_one(name)
         res = out[self.model]
         if self.model == "moon" and "planet" in out:
             pl = out["planet"]

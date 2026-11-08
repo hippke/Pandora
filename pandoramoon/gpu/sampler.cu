@@ -12,7 +12,7 @@
 // Same arithmetic as nss.ns (FP64 sampler state); different random streams (Philox), so runs agree statistically.
 
 #define MAXEXP 100
-#define NMAX 2048              // live points per run (bitonic selection size)
+#define NMAX 2048              // live points per run selected in shared memory (more: global scratch)
 #define DMAX 32                // dimensions
 #ifndef DIM
 #define DIM DMAX               // the run's dimension at compile time (sampler_module(D)); DMAX = generic
@@ -236,7 +236,8 @@ run_tick(int R_, int k_, int n_, int D_, int kpair_, int nsteps_, int cap_, doub
          double* __restrict__ LU, double* __restrict__ LL, unsigned char* __restrict__ ALIVE, int* __restrict__ NBR,
          double* __restrict__ SD, double* __restrict__ MIX, int* __restrict__ SEL, int* __restrict__ STARTS,
          double* __restrict__ DU, double* __restrict__ DL, double* __restrict__ DLW, int* __restrict__ INS,
-         const int* __restrict__ WR, long long* __restrict__ PROF) {
+         const int* __restrict__ WR, long long* __restrict__ PROF, double* __restrict__ GK, int* __restrict__ GI,
+         int ng) {
     long long t_last = clock64();
 #define SECTION(i) do { __syncthreads(); if (PROF && threadIdx.x == 0) { long long t_ = clock64(); \
         PROF[blockIdx.x * 16 + (i)] += t_ - t_last; t_last = t_; } } while (0)
@@ -245,6 +246,10 @@ run_tick(int R_, int k_, int n_, int D_, int kpair_, int nsteps_, int cap_, doub
     cfg.log_frac = log_frac_; cfg.recluster = recluster_; cfg.seed = seed_; cfg.sd_every = sd_every_;
     __shared__ double skey[NMAX];
     __shared__ int sidx[NMAX];
+    // the selection buffers: shared memory for n <= NMAX, else the run's row of the global scratch GK / GI (ng >= n)
+    double* key = skey;
+    int* kix = sidx;
+    if (n_ > NMAX) { key = GK + (size_t)blockIdx.x * ng; kix = GI + (size_t)blockIdx.x * ng; }
     __shared__ int s_flag;
     __shared__ long long s_sum[5];
     __shared__ float s_inv[DMAX];
@@ -277,12 +282,12 @@ run_tick(int R_, int k_, int n_, int D_, int kpair_, int nsteps_, int cap_, doub
         // insertion index: rank of each new logL among the n - k survivors (alive, not yet replaced);
         // shared copies of the live logL and the alive flags, one thread per new point
         if (run.nins + k > cfg.cap) { if (tid == 0) { run.overflow = 1; run.status = 3; } break; }
-        for (int q = tid; q < n; q += nt) { skey[q] = ll[q]; sidx[q] = alive[q]; }
+        for (int q = tid; q < n; q += nt) { key[q] = ll[q]; kix[q] = alive[q]; }
         __syncthreads();
         for (int j = tid; j < k; j += nt) {
             double Lc = ch[j].XL;
             int cnt = 0;
-            for (int q = 0; q < n; ++q) cnt += (sidx[q] && skey[q] < Lc) ? 1 : 0;
+            for (int q = 0; q < n; ++q) cnt += (kix[q] && key[q] < Lc) ? 1 : 0;
             INS[(size_t)r * cfg.cap + run.nins + j] = cnt;
         }
         __syncthreads();
@@ -343,17 +348,17 @@ run_tick(int R_, int k_, int n_, int D_, int kpair_, int nsteps_, int cap_, doub
     int m = 1;
     while (m < n) m <<= 1;
     for (int q = tid; q < m; q += nt) {
-        skey[q] = q < n ? ll[q] : INF_D;
-        sidx[q] = q;
+        key[q] = q < n ? ll[q] : INF_D;
+        kix[q] = q;
     }
-    bitonic(skey, sidx, m);
-    double Lmax = skey[n - 1];
+    bitonic(key, kix, m);
+    double Lmax = key[n - 1];
     if (run.nd + k + n > cfg.cap) { if (tid == 0) { run.overflow = 1; run.status = 3; } break; }
     SECTION(3);
     // record the k removed points: dead weights (parallel nested sampling: shrinkage 1 / (n - j))
     for (int t = tid; t < k * D; t += nt) {
         int j = t / D, i = t % D;
-        DU[((size_t)r * cfg.cap + run.nd + j) * D + i] = lu[(size_t)sidx[j] * D + i];
+        DU[((size_t)r * cfg.cap + run.nd + j) * D + i] = lu[(size_t)kix[j] * D + i];
     }
     __syncthreads();
     SECTION(4);
@@ -364,7 +369,7 @@ run_tick(int R_, int k_, int n_, int D_, int kpair_, int nsteps_, int cap_, doub
     if (tid == 0) { double S = 0.0; for (int jj = 0; jj < k; ++jj) { s_pre[jj] = S; S += s_inc[jj]; } s_pre[k] = S; }
     __syncthreads();
     for (int jj = tid; jj < k; jj += nt) {
-        int q = sidx[jj];
+        int q = kix[jj];
         double lwt = run.logX - s_pre[jj] + log(-expm1(-s_inc[jj]));
         DL[(size_t)r * cfg.cap + run.nd + jj] = ll[q];
         DLW[(size_t)r * cfg.cap + run.nd + jj] = lwt;
@@ -382,7 +387,7 @@ run_tick(int R_, int k_, int n_, int D_, int kpair_, int nsteps_, int cap_, doub
         run.nd += k;
         run.logX = logX;
         run.logZ = logZ;
-        run.Lmin = ll[sidx[k - 1]];
+        run.Lmin = ll[kix[k - 1]];
         s_flag = (isfinite(logZ) && logX + Lmax - logZ < cfg.log_frac) ? 1 : 0;
     }
     __syncthreads();

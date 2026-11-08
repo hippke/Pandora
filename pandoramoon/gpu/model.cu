@@ -235,6 +235,8 @@ __device__ __forceinline__ float eclipse_dm(float dm, float xp, float yp, float 
 // ------------------------------------------------------------------------------------------- one cadence
 struct CallP {
     float B, t0s, dt0, dP, ph0, ipm_hi, ipm_lo, w2pi, cO, sO, sc, cc, bb, ap, am, kp, km, u1, u2, reach, rs2, inv_f0;
+    float e, ax, bx, ay, by, sq;     // eccentric moon (e > 0): direction (ax X + bx Y, ay X + by Y), X = cos E - e,
+                                     // Y = sq sin E (ellipse._orbit_axes)
     bool moon_on, ecl_on;
 };
 static_assert(sizeof(CallP) <= 128, "CallP must fit the 32-float slot of limb_fix");
@@ -245,6 +247,23 @@ struct Data {
 #ifndef QCAP
 #define QCAP 64
 #endif
+
+// (cos E, sin E) of the eccentric anomaly at the phase f in [-1/2, 1/2) turns from tau (sin E signed by the half
+// orbit), 0 < e < 1: E = M + 0.85 e and four Halley steps in FP32 (ellipse._kepler_cs_fast; GPU_MODEL.md 2.1)
+__device__ __forceinline__ void kepler_cs(float f, float e, float& cE, float& sE) {
+    float M = TWO_PI_F * fabsf(f);
+    float E = M + 0.85f * e;
+#pragma unroll
+    for (int it = 0; it < 4; ++it) {
+        float s, c;
+        sincosf(E, &s, &c);
+        float g = E - e * s - M;
+        float fp = 1.f - e * c;
+        E -= 2.f * g * fp / (2.f * fp * fp - g * e * s);
+    }
+    sincosf(E, &sE, &cE);
+    if (f < 0.f) sE = -sE;
+}
 
 // mean deficit of cadence c over its SS sub-exposures. EXACT = false: a sample with a limb eclipse sets defer and
 // returns (the cadence is redone with EXACT = true); EXACT = true: the three-circle area there (er3).
@@ -271,6 +290,16 @@ __device__ __forceinline__ float cadence_deficit(int c, const CallP& P, const Da
         float dt = __ldg(&D.DT[c * SS + j]);
         float x = P.B * (base + dt) - P.t0s;
         float dl = (dt - dtc) * P.w2pi, d2 = dl * dl, sQ, cQ;
+        float vx, vy;
+        if (P.e > 0.f) {         // eccentric moon: Kepler's equation per sample
+            float p3 = fmaf(dt, P.ipm_hi, phe);
+            p3 -= floorf(p3 + 0.5f);
+            float cE, sE;
+            kepler_cs(p3, P.e, cE, sE);
+            float X = cE - P.e, Y = P.sq * sE;
+            vx = P.ax * X + P.bx * Y;
+            vy = P.ay * X + P.by * Y;
+        } else {
         if (d2 < 0.25f) {        // rotation from the cadence anchor (|dl| < 0.5 rad), short series
             float sd = dl * (1.f + d2 * (-1.f / 6.f + d2 * (1.f / 120.f + d2 * (-1.f / 5040.f + d2 * (1.f / 362880.f)))));
             float cd = 1.f + d2 * (-0.5f + d2 * (1.f / 24.f + d2 * (-1.f / 720.f + d2 * (1.f / 40320.f))));
@@ -281,7 +310,9 @@ __device__ __forceinline__ float cadence_deficit(int c, const CallP& P, const Da
             p2 -= floorf(p2 + 0.5f);
             sincospif(p2 + p2, &sQ, &cQ);
         }
-        float vx = P.cO * cQ - P.sc * sQ, vy = P.sO * cQ + P.cc * sQ;
+        vx = P.cO * cQ - P.sc * sQ;
+        vy = P.sO * cQ + P.cc * sQ;
+        }
         float xp = x - vx * P.ap, yp = P.bb - vy * P.ap;
         float zp2 = fmaf(xp, xp, yp * yp);
         float dp = deficit(zp2, Pb), dm = 0.f;
@@ -327,7 +358,8 @@ __device__ __forceinline__ bool call_setup(const double* __restrict__ th, const 
     // physically meaningless here)
     double u1d = th[0], u2d = th[1];
     bool valid = th[2] > 0 && th[3] > 0 && th[4] > 0 && th[11] > 0 && th[13] > 0 && th[5] >= 0 && th[12] >= 0
-                 && th[19] >= 0 && u1d >= 0 && u1d + u2d <= 1 + 1e-12 && u1d + 2 * u2d >= -1e-12;
+                 && th[19] >= 0 && u1d >= 0 && u1d + u2d <= 1 + 1e-12 && u1d + 2 * u2d >= -1e-12
+                 && th[17] >= 0 && th[17] < 1 && th[8] >= 0 && th[8] < 1;
     int nonfinite = 0;                          // exponent bits all set: inf or NaN (integer test, no FP64 work)
 #pragma unroll
     for (int i = 0; i < 20; ++i) nonfinite |= ((__double2hiint(th[i]) & 0x7ff00000) == 0x7ff00000);
@@ -349,7 +381,8 @@ __device__ __forceinline__ bool call_setup(const double* __restrict__ th, const 
     // _moon_setup: a_moon [R_star]; Hill radius (G M_p P^2 / (12 pi^2))^(1/3) / R_star (no stellar mass: FP32 range)
     float a_m = cbrtf(GDAY * (M_p + M_m) * pm * pm) / R_star;
     float r_hill = cbrtf(GDAY * M_p * pb * pb * (1.f / 3.f)) / R_star;
-    bool unphys = (a_m / r_hill > S.hill) || (a_m < kp + km);
+    float em = (float)th[17];
+    bool unphys = (a_m * (1.f + em) / r_hill > S.hill) || (a_m * (1.f - em) < kp + km);
     float q = M_m / M_p;
     float a_pl = a_m * q / (1.f + q);
     P.ap = unphys ? 0.f : a_pl;
@@ -361,13 +394,26 @@ __device__ __forceinline__ bool call_setup(const double* __restrict__ th, const 
     sincosf(Om, &P.sO, &P.cO);
     P.sc = P.sO * ci;
     P.cc = P.cO * ci;
+    P.e = em;
+    if (em > 0.f) {                 // ellipse._orbit_axes (w in the orbit plane, then Omega, i); e = 0 ignores w
+        float sw, cw;
+        sincosf((float)th[18] * (PI_F / 180.f), &sw, &cw);
+        P.ax = P.cO * cw - P.sO * ci * sw;
+        P.bx = -P.cO * sw - P.sO * ci * cw;
+        P.ay = P.sO * cw + P.cO * ci * sw;
+        P.by = -P.sO * sw + P.cO * ci * cw;
+        P.sq = sqrtf((1.f - em) * (1.f + em));
+    } else {
+        P.ax = P.bx = P.ay = P.by = 0.f;
+        P.sq = 1.f;
+    }
     P.bb = (float)th[6];
     P.kp = kp; P.km = km; P.u1 = u1; P.u2 = u2;
     P.moon_on = !unphys && km > 0.f;
     // eclipse_impossible_circular with a relative margin 1e-6 (never claims "impossible" where the CPU could eclipse)
-    P.ecl_on = P.moon_on && !(fabsf(a_m * ci) * (1.f - 1e-6f) > kp + km);
+    P.ecl_on = P.moon_on && !(fabsf(a_m * (1.f - em) * ci) * (1.f - 1e-6f) > kp + km);
     P.w2pi = TWO_PI_F * P.ipm_hi;
-    P.reach = 1.f + fmaxf(kp, km) + P.am + P.ap + P.B * S.hspan;
+    P.reach = 1.f + fmaxf(kp, km) + (P.am + P.ap) * (1.f + em) + P.B * S.hspan;
     P.rs2 = (kp + km) * (kp + km);
     P.inv_f0 = 1.f / (PI_F * (1.f - u1 * (1.f / 3.f) - u2 * (1.f / 6.f)));
     float om = 1.f / (1.f - u1 * (1.f / 3.f) - u2 * (1.f / 6.f));

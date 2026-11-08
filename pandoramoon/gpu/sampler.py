@@ -174,8 +174,11 @@ class GPURunPool:
         k = int(self.k_req or min(64, max(1, n // 8)))
         if not 1 <= k <= n // 4:
             raise ValueError("GPURunPool: k must be <= nlive / 4")
+        if n > 8192:
+            raise ValueError("GPURunPool: nlive <= 8192")
         cap = self.cap_factor * n
-        per_slot = cap * (self.D * 8 + 8 + 8 + 4) + n * (self.D * 8 + 8 + 1 + 4 * self.kpair) + k * (3 * self.D * 8)
+        per_slot = (cap * (self.D * 8 + 8 + 8 + 4) + n * (self.D * 8 + 8 + 1 + 4 * self.kpair) + k * (3 * self.D * 8)
+                    + (12 * n * 2 if n > 2048 else 0))
         slots = int(self.slots_req or max(4, min(256, 4096 // k)))
         slots = max(1, min(slots, int(self.mem_budget // per_slot)))
         return k, slots, cap
@@ -232,6 +235,12 @@ class GPURunPool:
             DU=cuda.device_array((R, cap, D), np.float64), DL=cuda.device_array((R, cap), np.float64),
             DLW=cuda.device_array((R, cap), np.float64), INS=cuda.device_array((R, cap), np.int32),
             WR=cuda.to_device(self.wrapped))
+        ng = 1
+        while ng < n:
+            ng <<= 1
+        if n > 2048:                     # selection in global scratch (sampler.cu NMAX)
+            d["GK"] = cuda.device_array((R, ng), np.float64)
+            d["GI"] = cuda.device_array((R, ng), np.int32)
         P = {q: _cuda.ptr(a) for q, a in d.items()}
         mod = _cuda.sampler_module(D)
         self.k_chain = mod.get_kernel("chain_tick")
@@ -244,7 +253,7 @@ class GPURunPool:
                          np.int32(cap), np.float64(math.log(self.frac_remain)), np.float64(self.recluster),
                          np.uint32(0), np.int32(sd_every), P["RS"], P["CH"], P["X"], P["LU"], P["LL"], P["ALIVE"],
                          P["NBR"], P["SD"], P["MIX"], P["SEL"], P["STARTS"], P["DU"], P["DL"], P["DLW"], P["INS"],
-                         P["WR"], 0)
+                         P["WR"], 0, P.get("GK", 0), P.get("GI", 0), np.int32(ng))
         self.gc = (32 * C + 127) // 128
         self.main_stream = cc.LEGACY_DEFAULT_STREAM
         self.side = cc.Device().create_stream()
@@ -436,8 +445,8 @@ def gpu_runs(ev, ndim, wrapped=None, R=32, nlive=500, nsteps=None, k=64, seeds=N
     nss.run()-style dicts in the order of seeds"""
     from pandoramoon.nss import _FIT
     D = int(ndim)
-    if nlive > 2048:
-        raise ValueError("gpu_runs: nlive <= 2048 (NMAX of sampler.cu)")
+    if nlive > 8192:
+        raise ValueError("gpu_runs: nlive <= 8192")
     seeds = list(range(1, R + 1)) if seeds is None else [int(s) for s in seeds]
     nsteps = int(nsteps or _FIT["nsteps_per_dim"] * D)
     with GPURunPool(ev, D, wrapped=wrapped, slots=len(seeds), k=k, frac_remain=frac_remain, kpair=kpair,
