@@ -146,7 +146,7 @@ class GPURunPool:
     The random streams of a run derive from its seed, not from its slot."""
 
     def __init__(self, ev, ndim, wrapped=None, slots=None, k=None, frac_remain=0.01, kpair=4, recluster=0.25,
-                 init_min_draws=100_000, scale0=1.0, cap_factor=150, ticks_per_check=128, mem_budget=3.0e9,
+                 init_min_draws=100_000, scale0=1.0, cap_factor=60, ticks_per_check=128, mem_budget=3.0e9,
                  overlap=True):
         import threading
         from collections import deque
@@ -241,10 +241,21 @@ class GPURunPool:
         if n > 2048:                     # selection in global scratch (sampler.cu NMAX)
             d["GK"] = cuda.device_array((R, ng), np.float64)
             d["GI"] = cuda.device_array((R, ng), np.int32)
-        P = {q: _cuda.ptr(a) for q, a in d.items()}
         mod = _cuda.sampler_module(D)
         self.k_chain = mod.get_kernel("chain_tick")
         self.k_run = mod.get_kernel("run_tick")
+        self.ng = ng
+        self._args()
+        self.gc = (32 * C + 127) // 128
+        self.main_stream = cc.LEGACY_DEFAULT_STREAM
+        self.side = cc.Device().create_stream()
+        self.slot = [None] * R           # slot -> _Req
+        self.nbr0_slot = np.ascontiguousarray(nbr0[0])
+
+    def _args(self):
+        """the kernel argument tuples (after an allocation or a buffer growth)"""
+        d, n, k, R, D, cap, ng = self.d, self.n, self.k, self.R, self.D, self.cap, self.ng
+        P = {q: _cuda.ptr(a) for q, a in d.items()}
         sd_every = max(1, n // (10 * k))
         self.chain_args = (np.int32(R), np.int32(k), np.int32(n), np.int32(D), np.int32(self.kpair), np.int32(0),
                            np.uint32(0), P["CH"], P["RS"], P["X"], P["V"], P["PU"], P["LW"], P["LLK"], P["ACT"],
@@ -254,11 +265,27 @@ class GPURunPool:
                          np.uint32(0), np.int32(sd_every), P["RS"], P["CH"], P["X"], P["LU"], P["LL"], P["ALIVE"],
                          P["NBR"], P["SD"], P["MIX"], P["SEL"], P["STARTS"], P["DU"], P["DL"], P["DLW"], P["INS"],
                          P["WR"], 0, P.get("GK", 0), P.get("GI", 0), np.int32(ng))
-        self.gc = (32 * C + 127) // 128
-        self.main_stream = cc.LEGACY_DEFAULT_STREAM
-        self.side = cc.Device().create_stream()
-        self.slot = [None] * R           # slot -> _Req
-        self.nbr0_slot = np.ascontiguousarray(nbr0[0])
+
+    def _grow(self):
+        """double the dead-point buffers (DU, DL, DLW, INS), keeping their contents; False if the memory budget
+        does not allow it (a run then aborts with a buffer overflow)"""
+        from numba import cuda
+        R, D, cap = self.R, self.D, self.cap
+        new = 2 * cap
+        if R * new * (D * 8 + 8 + 8 + 4) > 2.0 * self.mem_budget:
+            return False
+        for name, dt, tail in (("DU", np.float64, (D,)), ("DL", np.float64, ()), ("DLW", np.float64, ()),
+                               ("INS", np.int32, ())):
+            old = self.d[name]
+            arr = cuda.device_array((R, new) + tail, dt)
+            for r in range(R):
+                arr[r, :cap].copy_to_device(old[r])
+            self.d[name] = arr
+            del old
+        self.cap = new
+        self._args()
+        self.stats["grow"] = self.stats.get("grow", 0) + 1
+        return True
 
     def _start(self, r, req):
         """initialise slot r for request req (the device is idle: called between tick bursts)"""
@@ -341,6 +368,10 @@ class GPURunPool:
         from numba import cuda
         if self.n is not None:
             st = self.d["RS"].copy_to_host().view(RUN_DTYPE)
+            run_ = st["status"] == 1
+            if run_.any() and int(st["nd"][run_].max()) > 0.8 * self.cap:
+                if self._grow():
+                    st = self.d["RS"].copy_to_host().view(RUN_DTYPE)
             for r, req in enumerate(self.slot):
                 if req is None:
                     continue
@@ -440,7 +471,7 @@ class GPURunPool:
 
 
 def gpu_runs(ev, ndim, wrapped=None, R=32, nlive=500, nsteps=None, k=64, seeds=None, frac_remain=0.01, kpair=4,
-             recluster=0.25, init_min_draws=100_000, scale0=1.0, cap_factor=150, overlap=True, **kw):
+             recluster=0.25, init_min_draws=100_000, scale0=1.0, cap_factor=60, overlap=True, **kw):
     """R independent nested-sampling runs on the GPU at once (a GPURunPool with R slots); returns their
     nss.run()-style dicts in the order of seeds"""
     from pandoramoon.nss import _FIT

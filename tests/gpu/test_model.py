@@ -312,7 +312,47 @@ def test_eccentric_moon():
     return "; ".join(out) + f"; max |dlogL| / bound {worst:.2f}"
 
 
-TESTS = [test_deficit, test_er3, test_loglike_tutorial, test_long_kepler, test_long_baseline, test_edge_cases,
+def _ptx_f64(kernel="loglike", ss=5):
+    """FP64 arithmetic instructions in the PTX of a model.cu kernel (its whole body, inlined device functions
+    included)"""
+    import re
+    import cuda.core as cc
+    from pandoramoon.gpu import _cuda
+    from pandoramoon import occult as O
+    import math as m_
+    from pandoramoon.constants import G, DAY
+    dev = cc.Device()
+    dev.set_current()
+    cap = dev.compute_capability
+    defs = [("SS", str(ss)), ("WARPS", "4"), ("MINB", "8"),
+            ("LY0", f"{float(np.float32(O.LIMB_TAB_Y0))!r}f"), ("LSC", f"{float(np.float32(O.LIMB_TAB_SCALE))!r}f"),
+            ("IY0", f"{float(np.float32(O.INT_TAB_Y0))!r}f"), ("ISC", f"{float(np.float32(O.INT_TAB_SCALE))!r}f"),
+            ("GDAY", f"{G * DAY ** 2 / (4 * m_.pi ** 2)!r}f")]
+    opts = cc.ProgramOptions(arch=f"sm_{cap.major}{cap.minor}", use_fast_math=True, define_macro=defs, std="c++17")
+    ptx = cc.Program(_cuda._source(), code_type="c++", options=opts).compile("ptx").code
+    ptx = ptx.decode() if isinstance(ptx, bytes) else ptx
+    a = ptx.index(f".entry {kernel}(")
+    b = ptx.find(".entry ", a + 1)
+    body = ptx[a:b if b > 0 else len(ptx)]
+    ops = re.findall(r"^\s*(?:@%p\d+\s+)?((?:add|sub|mul|fma|div|rcp|sqrt|neg|abs|min|max|setp|cvt)[\w.]*\.f64)\b",
+                     body, flags=re.M)
+    return len(ops), body
+
+
+# FP64 arithmetic in kernel 1 (`loglike`): validity comparisons, the reference offsets of the epoch and the moon
+# phase, the conversions of the 20 parameters and the warp reduction of chi^2 (GPU_MODEL.md). Measured 2026-11-08:
+# 63 (21 conversions, 22 comparisons, 20 add / sub / mul / fma / rcp / floor). Many more mean FP64 slipped into the
+# per-sample code (e.g. a float literal without f).
+F64_LOGLIKE_MAX = 80
+
+
+def test_fp64_lint():
+    n, body = _ptx_f64("loglike")
+    assert n <= F64_LOGLIKE_MAX, (n, "FP64 instructions in loglike: FP64 in the sample loop?")
+    return f"{n} FP64 arithmetic instructions in loglike (limit {F64_LOGLIKE_MAX})"
+
+
+TESTS = [test_fp64_lint, test_deficit, test_er3, test_loglike_tutorial, test_long_kepler, test_long_baseline, test_edge_cases,
          test_transform, test_eccentric_moon]
 
 if __name__ == "__main__":
