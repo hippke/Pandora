@@ -41,6 +41,10 @@ class PandoraEvaluator:
         if int(model.D[9]) != 1:
             raise ValueError("PandoraEvaluator: the planet+moon model only (the planet-only model stays on the CPU)")
         self.tr = GPUTransform(model)
+        # eccentric moon only if ecc_moon is sampled or fixed above 0 (else the kernel without the Kepler loop)
+        D = model.D
+        ecc = bool(17 in set(np.asarray(D[11]).tolist()) or float(np.asarray(D[10])[17]) != 0.0)
+        kw.setdefault("eccentric", ecc)
         self.like = GPULikelihood(like, t0_ref=t0_ref, **kw)
         self._th = None
 

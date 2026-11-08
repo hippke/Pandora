@@ -26,7 +26,7 @@ def _two_float(x):
 
 
 class GPULikelihood:
-    def __init__(self, like, t0_ref, warps=4, minb=8, extra=()):
+    def __init__(self, like, t0_ref, warps=4, minb=8, extra=(), eccentric=True):
         from numba import cuda
         if like.cache is not None:
             raise ValueError("GPULikelihood: the occultation cache is not supported (pass cache=None)")
@@ -65,7 +65,9 @@ class GPULikelihood:
             EHI=cuda.to_device(ehi), ELO=cuda.to_device(elo),
             IV=cuda.to_device(np.asarray(like.inv_var, dtype=np.float32)),
             LN=cuda.to_device((1.0 - np.asarray(like.data, dtype=np.float64)).astype(np.float32)))   # E = 1 - data
-        self.mod = _cuda.module(ss, warps, minb, extra)
+        # eccentric=False: compiled without the eccentric-moon loop (about 5 % faster); ecc_moon must then be 0
+        self.eccentric = bool(eccentric)
+        self.mod = _cuda.module(ss, warps, minb, tuple(extra) + (() if self.eccentric else (("NO_ECC", "1"),)))
         a = self.mod.get_kernel("loglike").attributes
         self.regs, self.local_bytes = a.num_regs, a.local_size_bytes
         self.kernel = self.mod.get_kernel("loglike")
@@ -82,6 +84,8 @@ class GPULikelihood:
         th = np.asarray(theta)
         if np.any(th[:, 8] != 0):
             raise ValueError("GPULikelihood: circular planet orbits only (ecc_bary = 0)")
+        if not self.eccentric and np.any(th[:, 17] != 0):
+            raise ValueError("GPULikelihood(eccentric=False): ecc_moon must be 0")
         if np.any(th[:, 17] > ECC_MOON_MAX):
             raise ValueError(f"GPULikelihood: ecc_moon <= {ECC_MOON_MAX} (validated range of the FP32 Kepler solver)")
         for col, name in ((5, "r_planet"), (12, "r_moon")):

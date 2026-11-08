@@ -15,6 +15,11 @@
 #define PI_F 3.14159265358979f
 #define TWO_PI_F 6.28318530717959f
 #define ROW 36          // shared-memory row of one coefficient set (36: bank-shifted)
+#ifdef NO_ECC
+#define ECC_ON 0        // compiled for circular moons only (GPULikelihood(eccentric=False)): no Kepler loop
+#else
+#define ECC_ON 1
+#endif
 
 // ------------------------------------------------------------------------------------------- occultation
 // deficit 1 - F of one body at squared distance z2 [R_star^2], from the per-call coefficient rows in shared
@@ -267,7 +272,7 @@ __device__ __forceinline__ void kepler_cs(float f, float e, float& cE, float& sE
 
 // mean deficit of cadence c over its SS sub-exposures. EXACT = false: a sample with a limb eclipse sets defer and
 // returns (the cadence is redone with EXACT = true); EXACT = true: the three-circle area there (er3).
-template <bool EXACT>
+template <bool EXACT, bool ECC>
 __device__ __forceinline__ float cadence_deficit(int c, const CallP& P, const Data& D, const Body& Pb,
                                                  const Body& Mb, bool& defer) {
     int e = __ldg(&D.EP[c]);
@@ -291,7 +296,7 @@ __device__ __forceinline__ float cadence_deficit(int c, const CallP& P, const Da
         float x = P.B * (base + dt) - P.t0s;
         float dl = (dt - dtc) * P.w2pi, d2 = dl * dl, sQ, cQ;
         float vx, vy;
-        if (P.e > 0.f) {         // eccentric moon: Kepler's equation per sample
+        if (ECC) {               // eccentric moon: Kepler's equation per sample (a separate instantiation)
             float p3 = fmaf(dt, P.ipm_hi, phe);
             p3 -= floorf(p3 + 0.5f);
             float cE, sE;
@@ -431,6 +436,33 @@ __device__ __forceinline__ bool call_setup(const double* __restrict__ th, const 
     return valid;
 }
 
+// kernel 1's cadence loop (lane l: cadences l, l + 32, ...): chi^2 of the cadences without a limb eclipse
+// (Neumaier-compensated), the others queued for limb_fix
+template <bool ECC>
+__device__ __forceinline__ void main_loop(int lane, int nc, int call, bool valid, const CallP& P, const Data& D,
+                                          const Body& Pb, const Body& Mb, const float* __restrict__ IV,
+                                          const float* __restrict__ E, int2* __restrict__ Q, int* __restrict__ QN,
+                                          int qcap, float& chi, float& comp, int& nlimb, bool& overflow) {
+    for (int c = lane; c < nc; c += 32) {
+        bool defer = false;
+        float d = cadence_deficit<false, ECC>(c, P, D, Pb, Mb, defer);
+        if (defer) {
+            ++nlimb;
+            if (valid) {
+                int iq = atomicAdd(QN, 1);
+                if (iq < qcap) Q[iq] = make_int2(call, c);
+                else overflow = true;
+            }
+            continue;
+        }
+        float r = d - __ldg(&E[c]);
+        float t = __ldg(&IV[c]) * r * r;
+        float s2 = chi + t;                                   // Neumaier summation
+        comp += (fabsf(chi) >= fabsf(t)) ? (chi - s2) + t : (t - s2) + chi;
+        chi = s2;
+    }
+}
+
 // Kernel 1 (the hot path): one warp per call. Cadences with a limb eclipse are left out of the chi^2 and queued
 // as (call, cadence) in Q; limb_fix adds them (GPU_LOG Round 3: the three-circle code in this kernel slowed every
 // call by ~30 %, executed or not).
@@ -451,29 +483,23 @@ loglike(const double* __restrict__ TH, int n,
     Scal S; S.t0_ref = t0_ref; S.te0 = te0; S.ed = ed; S.hill = hill; S.hspan = hspan;
     CallP P; Body Pb, Mb;
     bool valid = call_setup(TH + (size_t)call * 20, S, lane, LT, IT, sh[w], P, Pb, Mb);
+    // the call's set-up and coefficients for limb_fix, stored BEFORE the loop (stored after it, all CallP fields
+    // stayed live through the loop and spilled: GPU_LOG Round 7); ~3.5 us of stores per 2048 calls
+    {
+        float* co = COEF + (size_t)call * 4 * ROW;
+#pragma unroll
+        for (int r = 0; r < 4; ++r) co[r * ROW + lane] = sh[w][r][lane];
+        if (lane == 0) PCG[call] = P;
+    }
     Data D;
     D.DT = DT; D.EP = EP; D.EDT = EDT; D.EN = EN; D.EHI = EHI; D.ELO = ELO;
     float chi = 0.f, comp = 0.f;
     int nlimb = 0;
     bool overflow = false;
-    for (int c = lane; c < nc; c += 32) {
-        bool defer = false;
-        float d = cadence_deficit<false>(c, P, D, Pb, Mb, defer);
-        if (defer) {
-            ++nlimb;
-            if (valid) {
-                int iq = atomicAdd(QN, 1);
-                if (iq < qcap) Q[iq] = make_int2(call, c);
-                else overflow = true;
-            }
-            continue;
-        }
-        float r = d - __ldg(&E[c]);
-        float t = __ldg(&IV[c]) * r * r;
-        float s2 = chi + t;                                   // Neumaier summation
-        comp += (fabsf(chi) >= fabsf(t)) ? (chi - s2) + t : (t - s2) + chi;
-        chi = s2;
-    }
+    if (ECC_ON && P.e > 0.f)                       // uniform per call (warp): two loops, the circular one lean
+        main_loop<true>(lane, nc, call, valid, P, D, Pb, Mb, IV, E, Q, QN, qcap, chi, comp, nlimb, overflow);
+    else
+        main_loop<false>(lane, nc, call, valid, P, D, Pb, Mb, IV, E, Q, QN, qcap, chi, comp, nlimb, overflow);
     double v = (double)chi + (double)comp;
 #pragma unroll
     for (int off = 16; off > 0; off >>= 1) {
@@ -481,12 +507,6 @@ loglike(const double* __restrict__ TH, int n,
         nlimb += __shfl_down_sync(0xffffffffu, nlimb, off);
     }
     overflow = __any_sync(0xffffffffu, overflow);
-    if (__any_sync(0xffffffffu, nlimb > 0)) {     // nlimb is the warp total on lane 0 only; any lane > 0 suffices
-        float* co = COEF + (size_t)call * 4 * ROW;
-#pragma unroll
-        for (int r = 0; r < 4; ++r) co[r * ROW + lane] = sh[w][r][lane];
-        if (lane == 0) PCG[call] = P;
-    }
     if (lane == 0) {
         double out = valid ? -0.5 * v : -__longlong_as_double(0x7ff0000000000000LL);
         OUT[call] = overflow ? __longlong_as_double(0x7ff8000000000000LL) : out;   // NaN: queue overflow
@@ -515,7 +535,8 @@ extern "C" __global__ void limb_fix(const float* __restrict__ DT, const int* __r
         body_init(Pb, P.kp, co, co + ROW);
         body_init(Mb, fmaxf(P.km, 1e-4f), co + 2 * ROW, co + 3 * ROW);
         bool defer = false;
-        float d = cadence_deficit<true>(qc.y, P, D, Pb, Mb, defer);
+        float d = (ECC_ON && P.e > 0.f) ? cadence_deficit<true, true>(qc.y, P, D, Pb, Mb, defer)
+                            : cadence_deficit<true, false>(qc.y, P, D, Pb, Mb, defer);
         float r = d - E[qc.y];
         atomicAdd(&OUT[qc.x], -0.5 * (double)(IV[qc.y] * r * r));
     }
