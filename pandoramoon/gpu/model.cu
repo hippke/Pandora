@@ -480,6 +480,131 @@ extern "C" __global__ void limb_fix(const float* __restrict__ DT, const int* __r
     }
 }
 
+// ------------------------------------------------------------------------------------------- prior transform
+// sampling._theta on the device, FP64, one thread per point (GPU_MODEL.md section 6a): unit cube U (n, ndim) ->
+// Pandora parameters TH (n, 20) and the log weight LW (n) of the sampled coordinates (LOGZERO = -1e300 outside the
+// prior). The prior is packed by pandoramoon.gpu.transform.pack():
+//   IS: [nk, ld_mode, mp, pm_k, ld_c0, ld_c1, mp_c0, mp_c1, mp_c2, ncdf, nat_p[nk], nat_c[nk], nat_k[nk]]
+//   DS: [base[20], nat_par[nk * 4], ld_par[6], mp_f[6], pm_par[4], CDF[ncdf]]
+#define LOGZERO_D (-1e300)
+#define INF_D __longlong_as_double(0x7ff0000000000000LL)
+
+__device__ double ndtri_d(double p) {          // sampling._ndtri: Acklam + one Halley step
+    if (!(p > 0.0 && p < 1.0)) return p <= 0.0 ? -INF_D : INF_D;
+    const double a1 = -3.969683028665376e+01, a2 = 2.209460984245205e+02, a3 = -2.759285104469687e+02;
+    const double a4 = 1.383577518672690e+02, a5 = -3.066479806614716e+01, a6 = 2.506628277459239e+00;
+    const double b1 = -5.447609879822406e+01, b2 = 1.615858368580409e+02, b3 = -1.556989798598866e+02;
+    const double b4 = 6.680131188771972e+01, b5 = -1.328068155288572e+01;
+    const double c1 = -7.784894002430293e-03, c2 = -3.223964580411365e-01, c3 = -2.400758277161838e+00;
+    const double c4 = -2.549732539343734e+00, c5 = 4.374664141464968e+00, c6 = 2.938163982698783e+00;
+    const double d1 = 7.784695709041462e-03, d2 = 3.224671290700398e-01, d3 = 2.445134137142996e+00;
+    const double d4 = 3.754408661907416e+00;
+    const double plow = 0.02425;
+    double x;
+    if (p < plow) {
+        double q = sqrt(-2.0 * log(p));
+        x = (((((c1 * q + c2) * q + c3) * q + c4) * q + c5) * q + c6) / ((((d1 * q + d2) * q + d3) * q + d4) * q + 1.0);
+    } else if (p <= 1.0 - plow) {
+        double q = p - 0.5, r = q * q;
+        x = (((((a1 * r + a2) * r + a3) * r + a4) * r + a5) * r + a6) * q /
+            (((((b1 * r + b2) * r + b3) * r + b4) * r + b5) * r + 1.0);
+    } else {
+        double q = sqrt(-2.0 * log(1.0 - p));
+        x = -(((((c1 * q + c2) * q + c3) * q + c4) * q + c5) * q + c6) / ((((d1 * q + d2) * q + d3) * q + d4) * q + 1.0);
+    }
+    double e = 0.5 * erfc(-x / sqrt(2.0)) - p;
+    double u = e * sqrt(2.0 * 3.141592653589793) * exp(0.5 * x * x);
+    return x - u / (1.0 + 0.5 * x * u);
+}
+
+__device__ __forceinline__ double ppf_d(int kind, const double* par, double u) {
+    if (kind == 0) return par[0] + u * (par[1] - par[0]);
+    if (kind == 1) return exp(par[0] + u * (par[1] - par[0]));
+    return par[0] + par[1] * ndtri_d(par[2] + u * (par[3] - par[2]));
+}
+
+__device__ double logpdf_d(int kind, const double* par, double x) {
+    double a = par[0], b = par[1], c = par[2], d = par[3];
+    if (kind == 0) return (x < a || x > b) ? -INF_D : -log(b - a);
+    if (kind == 1) {
+        if (x <= 0.0 || log(x) < a || log(x) > b) return -INF_D;
+        return -log(x) - log(b - a);
+    }
+    double z = (x - a) / b;
+    double lo = c > 0.0 ? a + b * ndtri_d(c) : -INF_D;
+    double hi = d < 1.0 ? a + b * ndtri_d(d) : INF_D;
+    if (x < lo || x > hi) return -INF_D;
+    return -0.5 * z * z - log(b * sqrt(2.0 * 3.141592653589793)) - log(d - c);
+}
+
+extern "C" __global__ void transform(const double* __restrict__ U, int n, int ndim, const int* __restrict__ IS,
+                                     const double* __restrict__ DS, double* __restrict__ TH,
+                                     double* __restrict__ LW) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const double* u = U + (size_t)i * ndim;
+    double* th = TH + (size_t)i * 20;
+    int nk = IS[0], ld_mode = IS[1], mp = IS[2], pm_k = IS[3], ncdf = IS[9];
+    const int* nat_p = IS + 10;
+    const int* nat_c = nat_p + nk;
+    const int* nat_k = nat_c + nk;
+    const double* base = DS;
+    const double* nat_par = DS + 20;
+    const double* ld_par = nat_par + 4 * nk;
+    const double* mp_f = ld_par + 6;
+    const double* pm_par = mp_f + 6;
+    const double* CDF = pm_par + 4;
+    for (int j = 0; j < 20; ++j) th[j] = base[j];
+    double lw = 0.0;
+    for (int j = 0; j < nk; ++j) th[nat_p[j]] = ppf_d(nat_k[j], nat_par + 4 * j, u[nat_c[j]]);
+    bool ok = true;
+    if (ld_mode == 0) {
+        double q1 = th[0], q2 = th[1];
+        if (!(q1 >= 0.0 && q1 <= 1.0 && q2 >= 0.0 && q2 <= 1.0)) ok = false;
+        else {
+            double sq = sqrt(q1);
+            th[0] = 2.0 * sq * q2;
+            th[1] = sq * (1.0 - 2.0 * q2);
+        }
+    } else if (ld_mode == 1 || ld_mode == 2) {
+        if (ld_mode == 2) {
+            double z1 = ndtri_d(u[IS[4]]), z2 = ndtri_d(u[IS[5]]);
+            th[0] = ld_par[0] + ld_par[2] * z1;
+            th[1] = ld_par[1] + ld_par[3] * z1 + ld_par[4] * z2;
+        }
+        if (!(th[0] >= 0.0 && th[0] + th[1] <= 1.0 && th[0] + 2.0 * th[1] >= 0.0)) ok = false;
+        lw += ld_par[5];
+    }
+    if (ok && mp == 1) {
+        // _to_native: phase-at-transit coordinates -> (per_moon, tau, log w)
+        double phi_c = u[IS[6]], delta = u[IS[7]], u_m = u[IS[8]];
+        int lo = 0, hi = ncdf - 1;
+        while (lo < hi) {
+            int mid = (lo + hi) / 2;
+            if (CDF[mid] > u_m) hi = mid; else lo = mid + 1;
+        }
+        double m = mp_f[0] + lo;
+        double N = m + delta;
+        double per_bary = th[3];
+        double per_moon = per_bary / N;
+        double t_c = th[9] + th[10] + mp_f[3] * per_bary;
+        double x = t_c * N / per_bary - phi_c;
+        double tau = x - floor(x);
+        double logw = per_moon > mp_f[2] ? LOGZERO_D : log(per_bary / mp_f[2] * mp_f[1] * m * (m + 1.0) / (N * N));
+        if (!(logw > LOGZERO_D) || per_moon < mp_f[4]) ok = false;
+        else {
+            double lpdf = logpdf_d(pm_k, pm_par, per_moon);
+            if (!(lpdf > -INF_D)) ok = false;
+            else {
+                lw += logw + lpdf + mp_f[5];
+                th[13] = per_moon;
+                th[14] = tau;
+            }
+        }
+    }
+    LW[i] = ok ? lw : LOGZERO_D;
+}
+
 // ------------------------------------------------------------------------------------------- component tests
 // deficit of one body (k, u1, u2) at squared distances Z2 (one warp)
 extern "C" __global__ void t_deficit(float k, float u1, float u2, const float* __restrict__ Z2, int m,

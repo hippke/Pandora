@@ -246,7 +246,40 @@ def test_edge_cases():
     return f"{len(cases)} cases ({np.sum(~np.isfinite(ref))} invalid): max |dlogL| {max(msg):.2e}"
 
 
-TESTS = [test_deficit, test_er3, test_loglike_tutorial, test_long_kepler, test_long_baseline, test_edge_cases]
+def test_transform():
+    """the prior transform (sampling._theta) on the GPU vs the CPU: default priors with moon-phase coordinates, and
+    a prior with normal / log-uniform parameters and correlated limb darkening"""
+    import pandoramoon as pandora
+    from pandoramoon.sampling import _thetas, LOGZERO
+    from pandoramoon.gpu.transform import GPUTransform
+    import tutorial_data as td
+    params, like, priors = td.make()
+    pr2 = dict(priors)
+    pr2["R_star"] = pandora.Normal(696_342_000, 3e7, lo=5e8, hi=9e8)
+    pr2["M_planet"] = pandora.LogUniform(5e26, 5e27)
+    del pr2["q1"], pr2["q2"]
+    pr2["u1"] = pandora.Normal(0.41, 0.1)
+    pr2["u2"] = pandora.Normal(0.26, 0.1)
+    out = []
+    for lab, pr, kw in (("default", priors, {}), ("normal / log-uniform, correlated LD", pr2,
+                                                   dict(ld_correlation=0.5))):
+        S = pandora.NestedSampler(like, pr, verbose=False, **kw)
+        m = S.models["moon"]
+        U = np.random.default_rng(5).uniform(size=(50000, m.ndim))
+        th_c, lw_c = _thetas(U, m.D)
+        th_g, lw_g = GPUTransform(m)(U)
+        okc = lw_c > LOGZERO
+        assert np.array_equal(okc, lw_g > LOGZERO), (lab, "LOGZERO pattern differs")
+        # relative, and absolute below 1 (tau_moon = x - floor(x) of x ~ 100: FMA contraction differs at 1e-14)
+        dth = np.max(np.abs(th_g[okc] - th_c[okc]) / np.maximum(1.0, np.abs(th_c[okc])))
+        dlw = np.max(np.abs(lw_g[okc] - lw_c[okc]))
+        assert dth <= 1e-12 and dlw <= 1e-10, (lab, dth, dlw)
+        out.append(f"{lab}: {okc.mean():.3f} inside, max rel |d theta| {dth:.1e}, max |d lw| {dlw:.1e}")
+    return "; ".join(out)
+
+
+TESTS = [test_deficit, test_er3, test_loglike_tutorial, test_long_kepler, test_long_baseline, test_edge_cases,
+         test_transform]
 
 if __name__ == "__main__":
     if not _gpu():
