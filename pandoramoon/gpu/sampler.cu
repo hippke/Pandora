@@ -57,10 +57,11 @@ struct Run {                   // layout mirrored in sampler.py (RUN_DTYPE)
     double logX, logZ, Lmin, scale;
     long long ncall, nexp_tot, nstep_tot, nstuck, nmaxexp;
     int it, nd, nins, nrecl, repl_since, status, nmix, overflow;
-    u64 rng;
-    int phase, nsel;
+    u64 seed;                  // the run's seed: all its random streams derive from it (slot-independent)
+    int phase, nsteps;         // nsteps: slice steps per chain (per run: the arms of nss.fit differ)
 };
-// status: 1 running, 2 finished, 3 aborted (overflow); phase: 0 begin an iteration, 1 chains running
+// status: 0 free slot, 1 running, 2 finished, 3 aborted (buffer overflow), 4 aborted by the host;
+// phase: 0 begin an iteration, 1 chains running
 
 struct Chain {                 // layout mirrored in sampler.py (CHAIN_DTYPE)
     double XL, left, right, t;
@@ -114,13 +115,16 @@ extern "C" __global__ void chain_tick(int R_, int k_, int n_, int D_, int kpair_
     Chain ch = CH[c];
     if (ch.state == 0) return;
     double Lmin = RS[r].Lmin, scale = RS[r].scale;
+    int nsteps_r = RS[r].nsteps;
+    u64 rseed = RS[r].seed;
     bool act = lane < D;
     size_t o = (size_t)c * D + lane;
     double xi = act ? X[o] : 0.0, vi = act ? V[o] : 0.0, xni = act ? PU[o] : 0.0;
     int wr = act ? WR[lane] : 0;
     const double* lu = LU + (size_t)r * n * D;
     const unsigned char* alive = ALIVE + (size_t)r * n;
-    Rng g; g.k0 = seed_ ^ (0x85ebca6bu * (unsigned int)(r + 1)); g.k1 = 0xc2b2ae35u * (unsigned int)(c + 1); g.ctr = ch.ctr;
+    Rng g; g.k0 = (unsigned int)rseed ^ 0x85ebca6bu; g.k1 = (unsigned int)(rseed >> 32) ^ (0xc2b2ae35u * (unsigned int)(c % k + 1));
+    g.ctr = ch.ctr;
     double L = 0.0;
     if (had) {
         double lw = LW[c];
@@ -129,7 +133,7 @@ extern "C" __global__ void chain_tick(int R_, int k_, int n_, int D_, int kpair_
     bool pending = had, need = false;
     for (int guard = 0; guard < 4 * MAXEXP + 10000; ++guard) {
         if (ch.state == 1) {                                   // a new slice step
-            if (ch.step >= nsteps_) { ch.state = 0; break; }
+            if (ch.step >= nsteps_r) { ch.state = 0; break; }
             int pa;
             do { pa = rint_(g, n); } while (!alive[pa]);
             int pb = NBR[((size_t)r * n + pa) * kpair_ + rint_(g, kpair_)];
@@ -323,9 +327,9 @@ run_tick(int R_, int k_, int n_, int D_, int kpair_, int nsteps_, int cap_, doub
             run.nexp_tot += s_sum[1];
             run.nstuck += s_sum[2];
             run.nmaxexp += s_sum[3];
-            run.nstep_tot += (long long)k * cfg.nsteps;
+            run.nstep_tot += (long long)k * run.nsteps;
             // scale adaptation: aim at ~1 expansion per step
-            if (s_sum[1] > (long long)k * cfg.nsteps) run.scale *= 1.1; else run.scale /= 1.1;
+            if (s_sum[1] > (long long)k * run.nsteps) run.scale *= 1.1; else run.scale /= 1.1;
             run.scale = fmin(fmax(run.scale, 1e-3), 1e3);
             run.it += 1;
             run.phase = 0;
@@ -474,8 +478,8 @@ run_tick(int R_, int k_, int n_, int D_, int kpair_, int nsteps_, int cap_, doub
     SECTION(8);
     // start points (random alive) and the chains
     for (int j = tid; j < k; j += nt) {
-        Rng g; g.k0 = cfg.seed ^ 0x27d4eb2fu ^ (0x9E3779B9u * (unsigned int)(j + 1));
-        g.k1 = 0x165667b1u * (unsigned int)(r + 1); g.ctr = ((u64)run.it << 20);
+        Rng g; g.k0 = (unsigned int)run.seed ^ 0x27d4eb2fu ^ (0x9E3779B9u * (unsigned int)(j + 1));
+        g.k1 = (unsigned int)(run.seed >> 32) ^ 0x165667b1u; g.ctr = ((u64)run.it << 20);
         int q;
         do { q = rint_(g, n); } while (!alive[q]);
         starts[j] = q;

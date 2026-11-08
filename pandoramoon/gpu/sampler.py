@@ -20,7 +20,7 @@ PLATEAU = -1e299
 
 RUN_DTYPE = np.dtype({
     "names": ["logX", "logZ", "Lmin", "scale", "ncall", "nexp_tot", "nstep_tot", "nstuck", "nmaxexp",
-              "it", "nd", "nins", "nrecl", "repl_since", "status", "nmix", "overflow", "rng", "phase", "nsel"],
+              "it", "nd", "nins", "nrecl", "repl_since", "status", "nmix", "overflow", "seed", "phase", "nsteps"],
     "formats": ["f8"] * 4 + ["i8"] * 5 + ["i4"] * 8 + ["u8"] + ["i4"] * 2,
     "offsets": [0, 8, 16, 24, 32, 40, 48, 56, 64, 72, 76, 80, 84, 88, 92, 96, 100, 104, 112, 116],
     "itemsize": 120})
@@ -118,173 +118,333 @@ def _init_live(ev, ndim, R, nlive, seeds, init_min_draws, chunk=100_000):
     return LU, LL, logx0, ndraw_all, nacc_all
 
 
-# ------------------------------------------------------------------------------------------------ the sampler
-def gpu_runs(ev, ndim, wrapped=None, R=32, nlive=500, nsteps=None, k=64, seeds=None, frac_remain=0.01, kpair=4,
-             recluster=0.25, init_min_draws=100_000, scale0=1.0, cap_factor=150, check_every=256,
-             max_ticks=50_000_000, verbose=False, profile=False, overlap=True):
-    """R independent nested-sampling runs on the GPU; returns a list of nss.run()-style dicts"""
-    from numba import cuda
-    from pandoramoon.nss import insertion_test, _FIT
-    if nlive > 2048:
-        raise ValueError("gpu_runs: nlive <= 2048 (NMAX of sampler.cu)")
-    if not 1 <= k <= nlive // 4:
-        raise ValueError("gpu_runs: k (points replaced per iteration) must be <= nlive / 4")
-    D = int(ndim)
-    n = int(nlive)
-    seeds = list(range(1, R + 1)) if seeds is None else [int(s) for s in seeds]
-    assert len(seeds) == R
-    nsteps = int(nsteps or _FIT["nsteps_per_dim"] * D)
-    wrapped = np.array(wrapped if wrapped is not None else [False] * D, dtype=np.int32)
-    cap = int(cap_factor * n)
-    mod = _cuda.sampler_module(D)
-    k_chain = mod.get_kernel("chain_tick")
-    k_run = mod.get_kernel("run_tick")
-    t0 = time.perf_counter()
-    LU, LL, logx0, ndraw, nacc = _init_live(ev, D, R, n, seeds, init_min_draws)
-    t1 = time.perf_counter()
-    C = R * k
-    rs = np.zeros(R, dtype=RUN_DTYPE)
-    rs["logX"] = logx0
-    rs["logZ"] = -np.inf
-    rs["scale"] = scale0
-    rs["status"] = 1
-    rs["phase"] = 0
-    rs["repl_since"] = 10 * n                 # neighbour lists at the first iteration (as nss.ns)
-    ch = np.zeros(C, dtype=CHAIN_DTYPE)
-    nbr0 = np.repeat(np.arange(n, dtype=np.int32)[None, :, None], R, axis=0).repeat(kpair, axis=2)
-    d = dict(
-        RS=cuda.to_device(rs.view(np.uint8)), CH=cuda.to_device(ch.view(np.uint8)),
-        X=cuda.device_array((C, D), np.float64), V=cuda.device_array((C, D), np.float64),
-        PU=cuda.to_device(np.full((C, D), 0.5)), LW=cuda.device_array(C, np.float64),
-        LLK=cuda.device_array(C, np.float64), ACT=cuda.to_device(np.zeros(C, np.int32)),
-        LU=cuda.to_device(np.ascontiguousarray(LU)), LL=cuda.to_device(np.ascontiguousarray(LL)),
-        ALIVE=cuda.to_device(np.ones((R, n), np.uint8)), NBR=cuda.to_device(np.ascontiguousarray(nbr0)),
-        SD=cuda.to_device(np.full((R, D), 0.1)), MIX=cuda.to_device(np.zeros((R, D))),
-        SEL=cuda.device_array((R, k), np.int32), STARTS=cuda.device_array((R, k), np.int32),
-        DU=cuda.device_array((R, cap, D), np.float64), DL=cuda.device_array((R, cap), np.float64),
-        DLW=cuda.device_array((R, cap), np.float64), INS=cuda.device_array((R, cap), np.int32),
-        WR=cuda.to_device(wrapped), PROF=cuda.to_device(np.zeros((R, 16), np.int64)))
-    P = {q: _cuda.ptr(a) for q, a in d.items()}
-    seed32 = np.uint32((seeds[0] * 2654435761) % 2 ** 32)
-    sd_every = max(1, n // (10 * k))
-    chain_args = (np.int32(R), np.int32(k), np.int32(n), np.int32(D), np.int32(kpair), np.int32(nsteps), seed32,
-                  P["CH"], P["RS"], P["X"], P["V"], P["PU"], P["LW"], P["LLK"], P["ACT"], P["LU"], P["ALIVE"],
-                  P["NBR"], P["WR"])
-    run_args = (np.int32(R), np.int32(k), np.int32(n), np.int32(D), np.int32(kpair), np.int32(nsteps), np.int32(cap),
-                np.float64(math.log(frac_remain)), np.float64(recluster), seed32, np.int32(sd_every),
-                P["RS"], P["CH"], P["X"], P["LU"], P["LL"], P["ALIVE"], P["NBR"], P["SD"], P["MIX"], P["SEL"],
-                P["STARTS"], P["DU"], P["DL"], P["DLW"], P["INS"], P["WR"], P["PROF"] if profile else 0)
-    gc = (32 * C + 127) // 128              # chain_tick: one warp per chain
-    import cuda.core as cc
-    main = cc.LEGACY_DEFAULT_STREAM
-    side = cc.Device().create_stream()
-    e_run = None
-    tick = 0
-    prof = None
-    while tick < max_ticks:
-        if profile and prof is None and tick >= 20 * check_every:
-            # device time of each part of a tick (events between the launches), the active chains, the host loop
-            ev_t = {q: [] for q in ("chain_tick", "run_tick", "evaluate")}
-            nact = []
-            for _ in range(400):
-                e0, e1, e2, e3 = cuda.event(), cuda.event(), cuda.event(), cuda.event()
-                e0.record()
-                _cuda.launch(k_chain, gc, 128, *chain_args)
-                e1.record()
-                _cuda.launch(k_run, R, 512, *run_args)
-                e2.record()
-                ev.evaluate(d["PU"], d["ACT"], C, d["LW"], d["LLK"])
-                e3.record()
-                e3.synchronize()
-                ev_t["chain_tick"].append(cuda.event_elapsed_time(e0, e1))
-                ev_t["run_tick"].append(cuda.event_elapsed_time(e1, e2))
-                ev_t["evaluate"].append(cuda.event_elapsed_time(e2, e3))
-                nact.append(int(d["ACT"].copy_to_host().sum()))
-            cuda.synchronize()
-            th0 = time.perf_counter()
-            for _ in range(200):
-                _cuda.launch(k_chain, gc, 128, *chain_args)
-                _cuda.launch(k_run, R, 512, *run_args)
-                ev.evaluate(d["PU"], d["ACT"], C, d["LW"], d["LLK"])
-            th1 = time.perf_counter()
-            cuda.synchronize()
-            th2 = time.perf_counter()
-            tick += 600
-            prof = {q: 1e3 * float(np.median(v)) for q, v in ev_t.items()}
-            prof.update({q + "_mean": 1e3 * float(np.mean(v)) for q, v in ev_t.items()})
-            prof.update({q + "_max": 1e3 * float(np.max(v)) for q, v in ev_t.items()})
-            prof.update(active_mean=float(np.mean(nact)), chains=C, host_us_per_tick=1e6 * (th1 - th0) / 200,
-                        wall_us_per_tick=1e6 * (th2 - th0) / 200)
-            print("  gpu_runs profile [us per tick]:", {q: round(v, 1) for q, v in prof.items()}, flush=True)
-            pr = d["PROF"].copy_to_host().sum(axis=0)[:10]
-            its = int(d["RS"].copy_to_host().view(RUN_DTYPE)["it"].sum())
-            names = ["done-check+ranks", "mixing", "replace+scale", "sort", "dead copy", "weights", "stop", "spread",
-                     "neighbours", "starts+chains"]
-            print("  run_tick sections [us per iteration end, clock 2.5 GHz assumed]:",
-                  {nm: round(v / 2.5e3 / max(its, 1), 1) for nm, v in zip(names, pr)}, flush=True)
-        for _ in range(check_every):
-            if overlap:
-                # run_tick on a second stream, concurrent with the evaluation: it touches only runs whose chains are
-                # all done (ACT = 0, not evaluated); the next chain_tick waits for it
-                main.wait(e_run) if tick or _ else None
-                _cuda.launch(k_chain, gc, 128, *chain_args, stream=main)
-                e_chain = main.record()
-                side.wait(e_chain)
-                _cuda.launch(k_run, R, 512, *run_args, stream=side)
-                e_run = side.record()
-                ev.evaluate(d["PU"], d["ACT"], C, d["LW"], d["LLK"])
-            else:
-                _cuda.launch(k_chain, gc, 128, *chain_args)
-                _cuda.launch(k_run, R, 512, *run_args)
-                ev.evaluate(d["PU"], d["ACT"], C, d["LW"], d["LLK"])
-        tick += check_every
-        if overlap:
-            main.wait(e_run)
-        cuda.synchronize()
-        st = d["RS"].copy_to_host().view(RUN_DTYPE)
-        if verbose and tick % (check_every * 40) == 0:
-            print(f"  gpu_runs: tick {tick}, running {np.sum(st['status'] == 1)}, it {st['it'].min()}-{st['it'].max()}, "
-                  f"calls {st['ncall'].sum():,}", flush=True)
-        if np.all(st["status"] != 1):
-            break
-    t2 = time.perf_counter()
-    st = d["RS"].copy_to_host().view(RUN_DTYPE)
-    if np.any(st["status"] == 3):
-        raise RuntimeError(f"gpu_runs: dead-point buffer overflow in {np.sum(st['status'] == 3)} run(s) "
-                           f"(raise cap_factor, now {cap_factor})")
-    if np.any(st["status"] == 1):
-        raise RuntimeError("gpu_runs: max_ticks reached")
-    DU = d["DU"].copy_to_host()
-    DL = d["DL"].copy_to_host()
-    DLW = d["DLW"].copy_to_host()
-    INS = d["INS"].copy_to_host()
-    MIX = d["MIX"].copy_to_host()
-    out = []
-    for r in range(R):
-        nd = int(st["nd"][r])
-        dU, dL, dlogw = DU[r, :nd], DL[r, :nd], DLW[r, :nd]
-        ins = INS[r, :int(st["nins"][r])].astype(np.int64)
+# ------------------------------------------------------------------------------------------------ the run pool
+def _seed64(seed):
+    """splitmix64 of the run's seed: the key of all its random streams on the device"""
+    z = (int(seed) + 0x9E3779B97F4A7C15) % 2 ** 64
+    z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) % 2 ** 64
+    z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) % 2 ** 64
+    return z ^ (z >> 31)
+
+
+class _Req:
+    __slots__ = ("nlive", "nsteps", "seed", "flag", "future", "t_start", "ndraw", "nacc", "logx0", "t_init")
+
+    def __init__(self, nlive, nsteps, seed, flag, future):
+        self.nlive, self.nsteps, self.seed, self.flag, self.future = nlive, nsteps, seed, flag, future
+
+
+class GPURunPool:
+    """An executor for nss.fit: submit(run, ..., nlive=, nsteps=, seed=, stop=flag) returns a Future of the run's
+    nss.run()-style dict. A background thread drives the GPU (chain_tick / run_tick / evaluation per tick) and starts
+    queued runs in the slots of finished or aborted ones (continuous scheduling). stop[0] != 0 aborts a run (its
+    future gets a partial dict); stop[1], stop[2] are kept at its calls and iterations (progress).
+
+    Every run replaces k = min(64, nlive // 8) points per iteration (parallel nested sampling, validated up to
+    k / n_live = 1/8, GPU_LOG Round 2.6); slots = 4096 // k runs at once (about 4096 chains in flight), fewer if the
+    dead-point buffers would exceed mem_budget bytes. A change of nlive between runs waits for the slots to drain.
+    The random streams of a run derive from its seed, not from its slot."""
+
+    def __init__(self, ev, ndim, wrapped=None, slots=None, k=None, frac_remain=0.01, kpair=4, recluster=0.25,
+                 init_min_draws=100_000, scale0=1.0, cap_factor=150, ticks_per_check=128, mem_budget=3.0e9,
+                 overlap=True):
+        import threading
+        from collections import deque
+        self.ev = ev
+        self.D = int(ndim)
+        self.wrapped = np.array(wrapped if wrapped is not None else [False] * self.D, dtype=np.int32)
+        self.slots_req, self.k_req = slots, k
+        self.frac_remain, self.kpair, self.recluster = float(frac_remain), int(kpair), float(recluster)
+        self.init_min_draws, self.scale0, self.cap_factor = int(init_min_draws), float(scale0), int(cap_factor)
+        self.ticks_per_check, self.mem_budget, self.overlap = int(ticks_per_check), float(mem_budget), bool(overlap)
+        self._queue = deque()
+        self._lock = threading.Lock()
+        self._wake = threading.Event()
+        self._closing = False
+        self.error = None
+        self.n = None
+        self.stats = dict(ticks=0, runs_done=0, runs_aborted=0, t_init=0.0, t_ticks=0.0)
+        self._thread = threading.Thread(target=self._main, name="GPURunPool", daemon=True)
+        self._thread.start()
+
+    # -------------------------------------------------------------------------------------------- configuration
+    def layout(self, nlive):
+        """(k, slots, cap) for a given n_live"""
+        n = int(nlive)
+        k = int(self.k_req or min(64, max(1, n // 8)))
+        if not 1 <= k <= n // 4:
+            raise ValueError("GPURunPool: k must be <= nlive / 4")
+        cap = self.cap_factor * n
+        per_slot = cap * (self.D * 8 + 8 + 8 + 4) + n * (self.D * 8 + 8 + 1 + 4 * self.kpair) + k * (3 * self.D * 8)
+        slots = int(self.slots_req or max(4, min(256, 4096 // k)))
+        slots = max(1, min(slots, int(self.mem_budget // per_slot)))
+        return k, slots, cap
+
+    def slots_for(self, nlive):
+        return self.layout(nlive)[1]
+
+    # -------------------------------------------------------------------------------------------- executor API
+    def submit(self, fn=None, *args, nlive, nsteps, seed, stop=None, **kw):
+        from concurrent.futures import Future
+        fut = Future()
+        flag = stop if stop is not None else np.zeros(3, dtype=np.int64)
+        with self._lock:
+            if self.error is not None:
+                fut.set_exception(self.error)
+                return fut
+            self._queue.append(_Req(int(nlive), int(nsteps), int(seed), flag, fut))
+        self._wake.set()
+        return fut
+
+    def shutdown(self, wait=True):
+        self._closing = True
+        self._wake.set()
+        if wait:
+            self._thread.join()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.shutdown(wait=True)
+        return False
+
+    # -------------------------------------------------------------------------------------------- the device
+    def _alloc(self, nlive):
+        from numba import cuda
+        import cuda.core as cc
+        n, D = int(nlive), self.D
+        k, R, cap = self.layout(n)
+        self.n, self.k, self.R, self.cap = n, k, R, cap
+        C = R * k
+        self.C = C
+        nbr0 = np.repeat(np.arange(n, dtype=np.int32)[None, :, None], R, axis=0).repeat(self.kpair, axis=2)
+        self.d = d = dict(
+            RS=cuda.to_device(np.zeros(R, dtype=RUN_DTYPE).view(np.uint8)),
+            CH=cuda.to_device(np.zeros(C, dtype=CHAIN_DTYPE).view(np.uint8)),
+            X=cuda.device_array((C, D), np.float64), V=cuda.device_array((C, D), np.float64),
+            PU=cuda.to_device(np.full((C, D), 0.5)), LW=cuda.device_array(C, np.float64),
+            LLK=cuda.device_array(C, np.float64), ACT=cuda.to_device(np.zeros(C, np.int32)),
+            LU=cuda.to_device(np.full((R, n, D), 0.5)), LL=cuda.to_device(np.zeros((R, n))),
+            ALIVE=cuda.to_device(np.ones((R, n), np.uint8)), NBR=cuda.to_device(np.ascontiguousarray(nbr0)),
+            SD=cuda.to_device(np.full((R, D), 0.1)), MIX=cuda.to_device(np.zeros((R, D))),
+            SEL=cuda.device_array((R, k), np.int32), STARTS=cuda.device_array((R, k), np.int32),
+            DU=cuda.device_array((R, cap, D), np.float64), DL=cuda.device_array((R, cap), np.float64),
+            DLW=cuda.device_array((R, cap), np.float64), INS=cuda.device_array((R, cap), np.int32),
+            WR=cuda.to_device(self.wrapped))
+        P = {q: _cuda.ptr(a) for q, a in d.items()}
+        mod = _cuda.sampler_module(D)
+        self.k_chain = mod.get_kernel("chain_tick")
+        self.k_run = mod.get_kernel("run_tick")
+        sd_every = max(1, n // (10 * k))
+        self.chain_args = (np.int32(R), np.int32(k), np.int32(n), np.int32(D), np.int32(self.kpair), np.int32(0),
+                           np.uint32(0), P["CH"], P["RS"], P["X"], P["V"], P["PU"], P["LW"], P["LLK"], P["ACT"],
+                           P["LU"], P["ALIVE"], P["NBR"], P["WR"])
+        self.run_args = (np.int32(R), np.int32(k), np.int32(n), np.int32(D), np.int32(self.kpair), np.int32(0),
+                         np.int32(cap), np.float64(math.log(self.frac_remain)), np.float64(self.recluster),
+                         np.uint32(0), np.int32(sd_every), P["RS"], P["CH"], P["X"], P["LU"], P["LL"], P["ALIVE"],
+                         P["NBR"], P["SD"], P["MIX"], P["SEL"], P["STARTS"], P["DU"], P["DL"], P["DLW"], P["INS"],
+                         P["WR"], 0)
+        self.gc = (32 * C + 127) // 128
+        self.main_stream = cc.LEGACY_DEFAULT_STREAM
+        self.side = cc.Device().create_stream()
+        self.slot = [None] * R           # slot -> _Req
+        self.nbr0_slot = np.ascontiguousarray(nbr0[0])
+
+    def _start(self, r, req):
+        """initialise slot r for request req (the device is idle: called between tick bursts)"""
+        t = time.perf_counter()
+        n, D, k = self.n, self.D, self.k
+        LU, LL, logx0, ndraw, nacc = _init_live(self.ev, D, 1, n, [req.seed], self.init_min_draws)
+        d = self.d
+        rec = np.zeros(1, dtype=RUN_DTYPE)
+        rec["logX"] = logx0[0]
+        rec["logZ"] = -np.inf
+        rec["scale"] = self.scale0
+        rec["status"] = 1
+        rec["phase"] = 0
+        rec["repl_since"] = 10 * n          # neighbour lists at the first iteration (as nss.ns)
+        rec["seed"] = _seed64(req.seed)
+        rec["nsteps"] = req.nsteps
+        isz, csz = RUN_DTYPE.itemsize, CHAIN_DTYPE.itemsize
+        d["RS"][r * isz:(r + 1) * isz].copy_to_device(rec.view(np.uint8))
+        d["CH"][r * k * csz:(r + 1) * k * csz].copy_to_device(np.zeros(k, dtype=CHAIN_DTYPE).view(np.uint8))
+        d["ACT"][r * k:(r + 1) * k].copy_to_device(np.zeros(k, np.int32))
+        d["LU"][r].copy_to_device(np.ascontiguousarray(LU[0]))
+        d["LL"][r].copy_to_device(np.ascontiguousarray(LL[0]))
+        d["ALIVE"][r].copy_to_device(np.ones(n, np.uint8))
+        d["NBR"][r].copy_to_device(self.nbr0_slot)
+        d["MIX"][r].copy_to_device(np.zeros(D))
+        d["SD"][r].copy_to_device(np.full(D, 0.1))
+        req.ndraw, req.nacc, req.logx0 = int(ndraw[0]), int(nacc[0]), float(logx0[0])
+        req.t_start = time.perf_counter()
+        req.t_init = req.t_start - t
+        self.stats["t_init"] += req.t_init
+        self.slot[r] = req
+
+    def _free(self, r):
+        rec = np.zeros(1, dtype=RUN_DTYPE)
+        isz = RUN_DTYPE.itemsize
+        self.d["RS"][r * isz:(r + 1) * isz].copy_to_device(rec.view(np.uint8))
+        self.slot[r] = None
+
+    def _result(self, r, st):
+        """the nss.run()-style dict of the finished run in slot r"""
+        from pandoramoon.nss import insertion_test
+        req, d, n, k = self.slot[r], self.d, self.n, self.k
+        nd, nins = int(st["nd"]), int(st["nins"])
+        dU = d["DU"][r, :nd].copy_to_host()
+        dL = d["DL"][r, :nd].copy_to_host()
+        dlogw = d["DLW"][r, :nd].copy_to_host()
+        ins = d["INS"][r, :nins].copy_to_host().astype(np.int64)
+        mix = d["MIX"][r].copy_to_host()
         lw = dlogw + dL
         logz = float(np.logaddexp.reduce(lw))
         w = np.exp(lw - logz)
         fin = w > 0
         H = float(np.sum(w[fin] * (dL[fin] - logz)))
-        rng = np.random.default_rng(seeds[r])
+        rng = np.random.default_rng(req.seed)
         cw = np.cumsum(w)
         cw /= cw[-1]
         nsamp = int(np.exp(-np.sum(w[fin] * np.log(w[fin]))))
         pos = (rng.uniform() + np.arange(nsamp)) / nsamp
         samples = dU[np.searchsorted(cw, pos)]
-        insd = insertion_test(ins, n - k, n, seeds[r])
-        out.append(dict(
-            seed=seeds[r], nlive=n, k=k, nsteps=nsteps, device="gpu",
-            ins_u=((ins + np.random.default_rng(seeds[r] + 11).uniform(size=len(ins))) / (n - k + 1)).astype(np.float32),
-            mix=MIX[r] / max(int(st["nmix"][r]), 1), insertion=insd, logz=logz,
-            logzerr=math.sqrt(max(H, 0.0) / n), H=H, ncall=int(st["ncall"][r]) + int(ndraw[r]),
-            niter=int(st["it"][r]), wall=t2 - t0, wall_init=t1 - t0, samples_u=samples,
-            ess=float(1.0 / np.sum(w ** 2)), dead_u=dU, dead_L=dL, logw=dlogw, maxL=float(dL.max()),
-            final_scale=float(st["scale"][r]), expand_rate=float(st["nexp_tot"][r] / max(st["nstep_tot"][r], 1)),
-            nrecluster=int(st["nrecl"][r]), dirs="pairs", logx0=float(logx0[r]), init_acc=int(nacc[r]),
-            init_draws=int(ndraw[r]), n_plateau=0, nstuck=int(st["nstuck"][r]), nmaxexp=int(st["nmaxexp"][r]),
-            ticks=tick))
+        insd = insertion_test(ins, n - k, n, req.seed)
+        wall = time.perf_counter() - req.t_start
+        return dict(
+            seed=req.seed, nlive=n, k=k, nsteps=req.nsteps, device="gpu",
+            ins_u=((ins + np.random.default_rng(req.seed + 11).uniform(size=len(ins))) / (n - k + 1)).astype(np.float32),
+            mix=mix / max(int(st["nmix"]), 1), insertion=insd, logz=logz, logzerr=math.sqrt(max(H, 0.0) / n), H=H,
+            ncall=int(st["ncall"]) + req.ndraw, niter=int(st["it"]), wall=wall + req.t_init, wall_init=req.t_init,
+            samples_u=samples, ess=float(1.0 / np.sum(w ** 2)), dead_u=dU, dead_L=dL, logw=dlogw,
+            maxL=float(dL.max()), final_scale=float(st["scale"]),
+            expand_rate=float(st["nexp_tot"] / max(st["nstep_tot"], 1)), nrecluster=int(st["nrecl"]), dirs="pairs",
+            logx0=req.logx0, init_acc=req.nacc, init_draws=req.ndraw, n_plateau=0, nstuck=int(st["nstuck"]),
+            nmaxexp=int(st["nmaxexp"]))
+
+    @staticmethod
+    def _aborted(req, ncall=0):
+        return dict(seed=req.seed, nlive=req.nlive, nsteps=req.nsteps, ncall=int(ncall), aborted=True,
+                    logz=float("nan"), samples_u=None, device="gpu")
+
+    def _service(self):
+        """between tick bursts (device idle): finished / aborted runs out, queued runs in. Returns #active slots."""
+        from numba import cuda
+        if self.n is not None:
+            st = self.d["RS"].copy_to_host().view(RUN_DTYPE)
+            for r, req in enumerate(self.slot):
+                if req is None:
+                    continue
+                s = int(st["status"][r])
+                req.flag[1] = int(st["ncall"][r]) + req.ndraw
+                req.flag[2] = int(st["it"][r])
+                if s == 2:
+                    res = self._result(r, st[r])
+                    self._free(r)
+                    self.stats["runs_done"] += 1
+                    req.future.set_result(res)
+                elif s == 3:
+                    self._free(r)
+                    req.future.set_exception(RuntimeError(
+                        f"GPURunPool: dead-point buffer overflow (cap_factor {self.cap_factor} x n_live); raise cap_factor"))
+                elif req.flag[0] != 0:
+                    ncall = int(st["ncall"][r]) + req.ndraw
+                    self._free(r)
+                    self.stats["runs_aborted"] += 1
+                    req.future.set_result(self._aborted(req, ncall))
+        # queued requests: aborted before their start, or started in free slots
+        while True:
+            with self._lock:
+                if not self._queue:
+                    break
+                req = self._queue[0]
+                if req.flag[0] != 0:
+                    self._queue.popleft()
+                    req.future.set_result(self._aborted(req))
+                    continue
+                active = 0 if self.n is None else sum(q is not None for q in self.slot)
+                if self.n != req.nlive:
+                    if active:
+                        break                    # an n_live change: wait until the slots drain
+                    self._queue.popleft()
+                    self._alloc(req.nlive)
+                else:
+                    if all(q is not None for q in self.slot):
+                        break
+                    self._queue.popleft()
+            r = self.slot.index(None)
+            self._start(r, req)
+        cuda.synchronize()
+        return 0 if self.n is None else sum(q is not None for q in self.slot)
+
+    def _burst(self):
+        t = time.perf_counter()
+        d, ev, C = self.d, self.ev, self.C
+        e_run = None
+        for i in range(self.ticks_per_check):
+            if self.overlap:
+                if e_run is not None:
+                    self.main_stream.wait(e_run)
+                _cuda.launch(self.k_chain, self.gc, 128, *self.chain_args, stream=self.main_stream)
+                e_chain = self.main_stream.record()
+                self.side.wait(e_chain)
+                _cuda.launch(self.k_run, self.R, 512, *self.run_args, stream=self.side)
+                e_run = self.side.record()
+                ev.evaluate(d["PU"], d["ACT"], C, d["LW"], d["LLK"])
+            else:
+                _cuda.launch(self.k_chain, self.gc, 128, *self.chain_args)
+                _cuda.launch(self.k_run, self.R, 512, *self.run_args)
+                ev.evaluate(d["PU"], d["ACT"], C, d["LW"], d["LLK"])
+        if e_run is not None:
+            self.main_stream.wait(e_run)
+        from numba import cuda
+        cuda.synchronize()
+        self.stats["ticks"] += self.ticks_per_check
+        self.stats["t_ticks"] += time.perf_counter() - t
+
+    def _main(self):
+        try:
+            import cuda.core as cc
+            from numba import cuda
+            cc.Device().set_current()
+            cuda.current_context()
+            while True:
+                active = self._service()
+                if active:
+                    self._burst()
+                    continue
+                if self._closing:
+                    with self._lock:
+                        empty = not self._queue
+                    if empty:
+                        break
+                self._wake.wait(0.05)
+                self._wake.clear()
+        except BaseException as ex:      # fail every pending future (the fit raises in the main thread)
+            self.error = ex
+            with self._lock:
+                pend = list(self._queue)
+                self._queue.clear()
+            for req in pend + [q for q in (self.slot if self.n is not None else []) if q is not None]:
+                if not req.future.done():
+                    req.future.set_exception(ex)
+
+
+def gpu_runs(ev, ndim, wrapped=None, R=32, nlive=500, nsteps=None, k=64, seeds=None, frac_remain=0.01, kpair=4,
+             recluster=0.25, init_min_draws=100_000, scale0=1.0, cap_factor=150, overlap=True, **kw):
+    """R independent nested-sampling runs on the GPU at once (a GPURunPool with R slots); returns their
+    nss.run()-style dicts in the order of seeds"""
+    from pandoramoon.nss import _FIT
+    D = int(ndim)
+    if nlive > 2048:
+        raise ValueError("gpu_runs: nlive <= 2048 (NMAX of sampler.cu)")
+    seeds = list(range(1, R + 1)) if seeds is None else [int(s) for s in seeds]
+    nsteps = int(nsteps or _FIT["nsteps_per_dim"] * D)
+    with GPURunPool(ev, D, wrapped=wrapped, slots=len(seeds), k=k, frac_remain=frac_remain, kpair=kpair,
+                    recluster=recluster, init_min_draws=init_min_draws, scale0=scale0, cap_factor=cap_factor,
+                    overlap=overlap) as pool:
+        futs = [pool.submit(nlive=nlive, nsteps=nsteps, seed=s) for s in seeds]
+        out = [f.result() for f in futs]
+        for o in out:
+            o["ticks"] = pool.stats["ticks"]
     return out

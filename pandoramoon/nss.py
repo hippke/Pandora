@@ -575,7 +575,7 @@ def run(ll_u, ndim, wrapped=None, nlive=1000, nsteps=None, K=None, k=1, frac_rem
     pos = (rng.uniform() + np.arange(nsamp)) / nsamp
     samples = dU[np.searchsorted(cw, pos)]
     insd = insertion_test(ins, nlive - k, nlive, seed)
-    return dict(seed=int(seed), nlive=int(nlive), ins_u=((ins + np.random.default_rng(seed + 11).uniform(size=len(ins))) / (nlive - k + 1)
+    return dict(seed=int(seed), nlive=int(nlive), k=int(k), ins_u=((ins + np.random.default_rng(seed + 11).uniform(size=len(ins))) / (nlive - k + 1)
                                        ).astype(np.float32), mix=mix, insertion=insd, logz=logz, logzerr=math.sqrt(max(H, 0.0) / nlive), H=H, ncall=int(ncall) + ninit, niter=int(it),
                 wall=t2 - t0, wall_init=t1 - t0, samples_u=samples, ess=ess, dead_u=dU, dead_L=dL, logw=dlogw,
                 maxL=float(dL.max()), final_scale=scale, expand_rate=exp_rate,
@@ -788,25 +788,42 @@ def fit_is(ll_u, ndim, wrapped=None, data=None, threads=12, seed=1, lz_tol=0.2, 
 
 def merge_weights(rs):
     """Merge independent runs into ONE nested-sampling run (Skilling 2006 Sect. 9; Higson et al. 2018,
-    dynesty merge_runs): all points sorted by logL; the number of live points just before point j is
-    N_live = sum n_i minus the final live points (of any run) already passed; the shrinkage per point
-    is exp(-1/N_live) as in run(). The live count only drops at final live points (a dead point of a
-    run is replaced by a new one of the same run). Returns (logZ, ln w + ln L per point, order)."""
-    Ls, fl = [], []
-    for r in rs:
-        n = r.get("nlive")
+    dynesty merge_runs): all points sorted by logL; the shrinkage at point j is exp(-1/N_live) with N_live the
+    number of live points (all runs) just before it, as in run(). Returns (logZ, ln w + ln L per point).
+
+    Runs that replace k > 1 points per iteration (r["k"]; parallel nested sampling, run(k > 1) and the GPU sampler)
+    remove each batch of k points before its replacements arrive (all above the batch's highest logL): while it
+    removes the j-th point of a batch, such a run has n - j live points, and n again after the batch. Each run's live
+    count is tracked through the merged sequence; for k = 1 (fit()'s CPU runs) it is the earlier rule (the count
+    drops only at final live points). The k > 1 bookkeeping matters: treating a k = 62, n = 500 run as k = 1 raised
+    the merged lnZ by ~1.3 nats in 400 iterations (GPU_LOG Round 5)."""
+    Ls, owner, pos, fin = [], [], [], []
+    nl0 = 0
+    ks = []
+    for i, r in enumerate(rs):
+        n = int(r.get("nlive"))
+        k = int(r.get("k", 1) or 1)
         L = r["dead_L"]
-        f = np.zeros(len(L), dtype=bool)
-        f[len(L) - n:] = True                   # run() appends its n final live points last
+        nd = len(L) - n                          # dead points; run() appends its n final live points last
         Ls.append(L)
-        fl.append(f)
+        owner.append(np.full(len(L), i, dtype=np.int64))
+        p = np.empty(len(L), dtype=np.int64)
+        p[:nd] = np.arange(nd) % k               # position in its batch (batches are stored ascending, k each)
+        p[nd:] = -1                              # final live point
+        pos.append(p)
+        nl0 += n
+        ks.append(k)
     L = np.concatenate(Ls)
-    f = np.concatenate(fl)
+    own = np.concatenate(owner)
+    pos = np.concatenate(pos)
     o = np.argsort(L, kind="stable")
     Lo = L[o]
-    fo = f[o]
-    ntot = int(f.sum())
-    nl = ntot - (np.cumsum(fo) - fo)            # live points just before removing point j
+    if all(k == 1 for k in ks):
+        fo = pos[o] < 0
+        nl = nl0 - (np.cumsum(fo) - fo)          # live points just before removing point j
+    else:
+        nl = _merged_live_counts(own[o], pos[o], np.array([int(r["nlive"]) for r in rs], dtype=np.int64),
+                                 np.array(ks, dtype=np.int64))
     dlx = 1.0 / nl
     # start volume (Round 19, init_reject): pooled acceptance fraction of the runs' rejection draws, else the mean logx0
     if all(r.get("init_draws", 0) > 0 for r in rs):
@@ -819,6 +836,27 @@ def merge_weights(rs):
     lwl = np.empty(len(L))
     lwl[o] = lw + Lo
     return float(np.logaddexp.reduce(lwl)), lwl
+
+
+@njit(cache=True)
+def _merged_live_counts(own, pos, nlive, ks):
+    """live points (all runs) just before each point of the merged, logL-sorted sequence: a run's count drops by one
+    per removed point, and returns to n_live after the last point of a batch (pos == k - 1); final live points
+    (pos == -1) are not replaced"""
+    live = nlive.copy()
+    tot = 0
+    for i in range(live.shape[0]):
+        tot += live[i]
+    out = np.empty(own.shape[0], dtype=np.float64)
+    for j in range(own.shape[0]):
+        r = own[j]
+        out[j] = tot
+        live[r] -= 1
+        tot -= 1
+        if pos[j] == ks[r] - 1:
+            live[r] += ks[r]
+            tot += ks[r]
+    return out
 
 
 def merge(rs, nsamp=None, seed=0):
@@ -973,7 +1011,8 @@ ACCURACY = {a: dict(nlive=_FIT[f"{a}_nlive"], lz_tol=_FIT[f"{a}_lz_tol"], ks_tol
 def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=None,
         max_runs=None, ks_tol=0.05, lz_tol=0.1, seed=1, dirs="pairs", frac_remain=0.01, verbose=True,
         post_map=None, kpair=4, check=True, max_nsteps=None, recluster=0.25, data=None,
-        accuracy=None, resume=None, callback=None, max_nlive=None, progress=False, progress_label="fit"):
+        accuracy=None, resume=None, callback=None, max_nlive=None, progress=False, progress_label="fit",
+        backend="cpu", gpu=None):
     """Nested sampling with built-in convergence checks.
 
     Independent serial nss runs (n_live = nlive each) run in parallel threads and are merged as one run
@@ -1016,7 +1055,12 @@ def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=
     dict(runs=[(nsteps, idx, run dict), ...], N=..., nesc=...) restarts from stored runs: the runs of the arms N
     and N/2 are reloaded, new runs take the smallest unused indices (run seed = seed + 1000 idx; the runs lost in
     flight at a crash are redone with their original seeds), and
-    the checks are evaluated before any new run is started (a fit that had passed passes again at once)."""
+    the checks are evaluated before any new run is started (a fit that had passed passes again at once).
+
+    backend="gpu" (experimental, GPU_PLAN.md): the runs execute on an NVIDIA GPU (pandoramoon.gpu.sampler.GPURunPool,
+    gpu=dict(evaluator=..., pool options)); the arms, rules and results are those above, `threads` becomes the
+    pool's number of slots. Every GPU run replaces k = min(64, n_live / 8) points per iteration (parallel nested
+    sampling) instead of 1."""
     from concurrent.futures import ThreadPoolExecutor
     import sys
     # progress status (Round 23): a status line every few seconds while the runs execute (as UltraNest's). The compiled
@@ -1060,6 +1104,15 @@ def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=
         a = ACCURACY[accuracy]
         nlive, lz_tol, ks_tol = a["nlive"], a["lz_tol"], a["ks_tol"]
         min_runs = min_runs or a["min_runs"]
+    pool = None
+    if backend == "gpu":
+        from pandoramoon.gpu.sampler import GPURunPool
+        g = dict(gpu or {})
+        ev = g.pop("evaluator")
+        pool = GPURunPool(ev, ndim, wrapped=wrapped, frac_remain=frac_remain, kpair=kpair, recluster=recluster, **g)
+        threads = pool.slots_for(nlive)
+    elif backend != "cpu":
+        raise ValueError('backend must be "cpu" or "gpu"')
     max_runs = max_runs or _FIT["max_runs"]
     nsteps = nsteps or _FIT["nsteps_per_dim"] * ndim
     max_nsteps = max_nsteps or _FIT["max_nsteps_per_dim"] * ndim
@@ -1069,9 +1122,10 @@ def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=
     nlesc = 0
     multimodal = [False]
     tc = time.perf_counter()
-    make_sampler(ll_u, False, data is not None)  # compile once, outside the threads
-    run(ll_u, ndim, wrapped=wrapped, nlive=max(40, 2 * ndim + 8), nsteps=2, k=1, max_iter=3, seed=seed + 999, data=data,
-        dirs=dirs, kpair=min(kpair, 4), init_reject=False)
+    if pool is None:
+        make_sampler(ll_u, False, data is not None)  # compile once, outside the threads
+        run(ll_u, ndim, wrapped=wrapped, nlive=max(40, 2 * ndim + 8), nsteps=2, k=1, max_iter=3, seed=seed + 999,
+            data=data, dirs=dirs, kpair=min(kpair, 4), init_reject=False)
     t_compile = time.perf_counter() - tc         # numba compile (first call per process); not in `wall`
     arms = {}                                    # nsteps -> list of runs
     hist = []
@@ -1264,7 +1318,7 @@ def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=
     # handler deleted by the wrong thread"; seen 10-14 in test_sampling after plot_run())
     import gc
     gc.collect()
-    with ThreadPoolExecutor(max_workers=threads) as ex:
+    with (pool if pool is not None else ThreadPoolExecutor(max_workers=threads)) as ex:
         def top_up():
             nonlocal nxt
             while len(inflight) < threads:
@@ -1418,7 +1472,8 @@ def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=
     mixm = np.mean([r["mix"] for r in R], axis=0)
     return dict(mix=mixm, logz=lzm, logzerr=hist[-1]["logz_err"], logzerr_boot=lzb, samples_u=samples, ess=ess,
                 runs=R, n_failed=len(bad), n_aborted=n_aborted[0], n_obsolete=n_obsolete[0], n_eval=n_eval[0],
-                n_eval_pre=n_eval[1], t_eval=t_eval[0], t_compile=t_compile, runs_check=arms.get(max(1, N // 2), []) if check else [], history=hist, passed=passed,
+                n_eval_pre=n_eval[1], t_eval=t_eval[0], t_compile=t_compile, backend=backend,
+                gpu_stats=dict(pool.stats, slots=pool.R if pool.n else None, k=pool.k if pool.n else None) if pool else None, runs_check=arms.get(max(1, N // 2), []) if check else [], history=hist, passed=passed,
                 wall=time.perf_counter() - t0, ncall=hist[-1]["ncall"], nlive=nlive, nlive0=nlive0,
                 n_nlive_escalations=nlesc, multimodal=multimodal[0], nsteps=N, nsteps0=nsteps,
                 n_escalations=nesc, dlnz_check=hist[-1].get("dlnz"), dlnz_check_err=hist[-1].get("dlnz_err"),

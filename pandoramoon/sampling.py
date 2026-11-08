@@ -621,7 +621,8 @@ def _jsonable(x):
 
 _RUN_SCALARS = ("seed", "nlive", "logz", "logzerr", "H", "ncall", "niter", "wall", "wall_init", "ess", "maxL",
                 "final_scale", "expand_rate", "nrecluster", "dirs",
-                "insertion", "logx0", "init_acc", "init_draws", "n_plateau", "nstuck", "nmaxexp")
+                "insertion", "logx0", "init_acc", "init_draws", "n_plateau", "nstuck", "nmaxexp",
+                "k", "nsteps", "device")          # k: points replaced per iteration (nss.merge_weights needs it)
 
 
 def _save_run(path, r):
@@ -960,9 +961,12 @@ class NestedSampler:
 
     def __init__(self, likelihood, priors, model="moon", compare_planet=True, moon_phase="auto", ld_correlation=0.0,
                  log_dir=None, resume="subfolder", threads=None, seed=1, verbose=True, supersampling="auto",
-                 planet_evidence="is"):
+                 planet_evidence="is", device="cpu"):
         if model not in ("moon", "planet"):
             raise ValueError('model must be "moon" or "planet"')
+        if device not in ("cpu", "gpu"):
+            raise ValueError('device must be "cpu" or "gpu"')
+        self.device = device
         if resume not in ("subfolder", "resume", "overwrite"):
             raise ValueError('resume must be "subfolder", "resume" or "overwrite"')
         self.supersampling_note = None
@@ -1018,6 +1022,20 @@ class NestedSampler:
             self.log_dir = log_dir
         self.results = None
         self._check_priors()
+
+    def _gpu_evaluator(self, m):
+        """the planet+moon model's unit-cube likelihood on the GPU (pandoramoon.gpu)"""
+        from pandoramoon import gpu
+        from pandoramoon.gpu.sampler import PandoraEvaluator
+        if not gpu.available():
+            raise RuntimeError('device="gpu": no usable NVIDIA GPU / CUDA Python packages (pip install pandoramoon[gpu])')
+        p = self.priors.get("t0_bary")
+        if isinstance(p, Prior):
+            lo, hi = p.support()
+            t0_ref = 0.5 * (lo + hi)
+        else:
+            t0_ref = float(p)
+        return PandoraEvaluator(m, self.likelihood, t0_ref=t0_ref)
 
     def _check_priors(self):
         """sanity check: the prior must not be mostly outside Pandora's valid parameter range"""
@@ -1077,6 +1095,8 @@ class NestedSampler:
                       f"({', '.join(m.cube_names)})", flush=True)
             mode = self.resume if self.resume == "resume" else "fresh"
             kh = {k: v for k, v in kw.items() if k != "threads"}
+            if self.device == "gpu" and name == "moon":
+                kh["device"] = "gpu"                 # GPU runs (k > 1 per iteration) are stored apart from CPU runs
             hs, hparts = self._settings_hash(name, kh), self._hash_parts(name, kh)
             done = False
             if name == "planet" and self.planet_evidence == "is" and not any(m.wrapped):
@@ -1088,7 +1108,10 @@ class NestedSampler:
                     print(f"  {name}: importance sampling not used ({info.get('reason')}): nested-sampling fit",
                           flush=True)
             if not done:
-                out[name] = _fit_model(m, kw, store, mode, hs, self.verbose, name, max_weighted=max_weighted_samples,
+                kw_m = kw
+                if self.device == "gpu" and name == "moon":
+                    kw_m = dict(kw, backend="gpu", gpu=dict(evaluator=self._gpu_evaluator(m)))
+                out[name] = _fit_model(m, kw_m, store, mode, hs, self.verbose, name, max_weighted=max_weighted_samples,
                                        progress=self.verbose if progress is None else progress, hash_parts=hparts)
         res = out[self.model]
         if self.model == "moon" and "planet" in out:
