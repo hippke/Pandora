@@ -396,11 +396,12 @@ loglike(const double* __restrict__ TH, int n,
         double t0_ref, double te0, double ed, float hill, float hspan,
         const float* __restrict__ LT, const float* __restrict__ IT,
         double* __restrict__ OUT, int* __restrict__ NLIMB, int2* __restrict__ Q, int* __restrict__ QN, int qcap,
-        CallP* __restrict__ PCG, float* __restrict__ COEF) {
+        CallP* __restrict__ PCG, float* __restrict__ COEF, const int* __restrict__ ACT) {
     __shared__ __align__(16) float sh[WARPS][4][ROW];
     int w = threadIdx.x >> 5, lane = threadIdx.x & 31;
     int call = blockIdx.x * WARPS + w;
     if (call >= n) return;
+    if (ACT && !ACT[call]) return;                 // the sampler's idle chains
     Scal S; S.t0_ref = t0_ref; S.te0 = te0; S.ed = ed; S.hill = hill; S.hspan = hspan;
     CallP P; Body Pb, Mb;
     bool valid = call_setup(TH + (size_t)call * 20, S, lane, LT, IT, sh[w], P, Pb, Mb);
@@ -539,9 +540,10 @@ __device__ double logpdf_d(int kind, const double* par, double x) {
 
 extern "C" __global__ void transform(const double* __restrict__ U, int n, int ndim, const int* __restrict__ IS,
                                      const double* __restrict__ DS, double* __restrict__ TH,
-                                     double* __restrict__ LW) {
+                                     double* __restrict__ LW, const int* __restrict__ ACT) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
+    if (ACT && !ACT[i]) return;
     const double* u = U + (size_t)i * ndim;
     double* th = TH + (size_t)i * 20;
     int nk = IS[0], ld_mode = IS[1], mp = IS[2], pm_k = IS[3], ncdf = IS[9];

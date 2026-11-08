@@ -37,9 +37,9 @@ class GPUTransform:
         self.dDS = cuda.to_device(DS)
         self.kernel = _cuda.module(1).get_kernel("transform")
 
-    def device(self, dU, n, dTH, dLW):
+    def device(self, dU, n, dTH, dLW, dACT=None):
         _cuda.launch(self.kernel, (n + 127) // 128, 128, _cuda.ptr(dU), np.int32(n), np.int32(self.ndim),
-                     _cuda.ptr(self.dIS), _cuda.ptr(self.dDS), _cuda.ptr(dTH), _cuda.ptr(dLW))
+                     _cuda.ptr(self.dIS), _cuda.ptr(self.dDS), _cuda.ptr(dTH), _cuda.ptr(dLW), _cuda.ptr(dACT))
 
     def __call__(self, U):
         from numba import cuda

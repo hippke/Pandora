@@ -91,7 +91,7 @@ class GPULikelihood:
         """queue entries per call: an upper bound on the limb-eclipse cadences of one call"""
         return int(min(self.nc, 64 + 8 * len(self.te)))
 
-    def loglike_device(self, dTH, n, dOUT, dNLIMB=None, fix=True, main=True):
+    def loglike_device(self, dTH, n, dOUT, dNLIMB=None, fix=True, main=True, dACT=None):
         """launch on device arrays: dTH (n, 20) float64 -> dOUT (n,) float64 (no sync). Two kernels: loglike
         (every cadence without a limb eclipse; those are queued) and limb_fix (the queued cadences). A call whose
         queue entries did not fit gets NaN (never observed: QPERCALL entries per call)."""
@@ -113,7 +113,8 @@ class GPULikelihood:
                          np.int32(self.nc), np.float64(self.t0_ref), np.float64(self.te[0]), np.float64(self.ed),
                          np.float32(L.hill_sphere_threshold), np.float32(self.hspan),
                          _cuda.ptr(self.LT), _cuda.ptr(self.IT), _cuda.ptr(dOUT), _cuda.ptr(dNLIMB),
-                         _cuda.ptr(self._q), _cuda.ptr(self.dQN), qcap, _cuda.ptr(self._pc), _cuda.ptr(self._co))
+                         _cuda.ptr(self._q), _cuda.ptr(self.dQN), qcap, _cuda.ptr(self._pc), _cuda.ptr(self._co),
+                         _cuda.ptr(dACT))
         if not fix:
             return
         _cuda.launch(self.kernel_fix, self.fix_blocks, 128,

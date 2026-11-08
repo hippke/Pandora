@@ -29,6 +29,23 @@ def _source():
     return _SRC
 
 
+def sampler_module(dim=None):
+    """compiled sampler.cu (cached per process), specialised to dimension dim (registers in the neighbour search)"""
+    key = ("sampler", dim)
+    if key in _MODULES:
+        return _MODULES[key]
+    import cuda.core as cc
+    dev = cc.Device()
+    dev.set_current()
+    cap = dev.compute_capability
+    with open(os.path.join(os.path.dirname(__file__), "sampler.cu")) as f:
+        src = f.read()
+    defs = [("DIM", str(int(dim)))] if dim else []
+    opts = cc.ProgramOptions(arch=f"sm_{cap.major}{cap.minor}", std="c++17", define_macro=defs or None)
+    _MODULES[key] = cc.Program(src, code_type="c++", options=opts).compile("cubin")
+    return _MODULES[key]
+
+
 def module(ss, warps=4, minb=8, extra=()):
     """compiled model.cu for supersampling factor ss (cached per process)"""
     key = (int(ss), int(warps), int(minb), tuple(extra))
@@ -57,9 +74,10 @@ def ptr(a):
     return a.__cuda_array_interface__["data"][0]
 
 
-def launch(kernel, grid, block, *args):
+def launch(kernel, grid, block, *args, stream=None):
     import cuda.core as cc
-    cc.launch(cc.LEGACY_DEFAULT_STREAM, cc.LaunchConfig(grid=grid, block=block), kernel, *args)
+    cc.launch(stream if stream is not None else cc.LEGACY_DEFAULT_STREAM, cc.LaunchConfig(grid=grid, block=block),
+              kernel, *args)
 
 
 _TABLES = None
