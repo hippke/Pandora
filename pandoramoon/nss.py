@@ -973,7 +973,8 @@ ACCURACY = {a: dict(nlive=_FIT[f"{a}_nlive"], lz_tol=_FIT[f"{a}_lz_tol"], ks_tol
 def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=None,
         max_runs=None, ks_tol=0.05, lz_tol=0.1, seed=1, dirs="pairs", frac_remain=0.01, verbose=True,
         post_map=None, kpair=4, check=True, max_nsteps=None, recluster=0.25, data=None,
-        accuracy=None, resume=None, callback=None, max_nlive=None, progress=False, progress_label="fit"):
+        accuracy=None, resume=None, callback=None, max_nlive=None, progress=False, progress_label="fit",
+        ordered=True):
     """Nested sampling with built-in convergence checks.
 
     Independent serial nss runs (n_live = nlive each) run in parallel threads and are merged as one run
@@ -1016,7 +1017,13 @@ def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=
     dict(runs=[(nsteps, idx, run dict), ...], N=..., nesc=...) restarts from stored runs: the runs of the arms N
     and N/2 are reloaded, new runs take the smallest unused indices (run seed = seed + 1000 idx; the runs lost in
     flight at a crash are redone with their original seeds), and
-    the checks are evaluated before any new run is started (a fit that had passed passes again at once)."""
+    the checks are evaluated before any new run is started (a fit that had passed passes again at once).
+
+    ordered (default True; False = the behaviour of Pandora 2.0): a finished run enters its arm only when every run
+    submitted before it to that arm has finished, so the runs used are a complete prefix in submission order. Without
+    it the runs in use are the first to FINISH, and a run's length is strongly anticorrelated with its lnZ (tutorial:
+    corr(lnZ, iterations) = -0.95; the shortest half of 64 runs is 0.41 nats above all 64): the runs in flight that
+    the stop discards are the long ones, which biased lnZ upwards."""
     from concurrent.futures import ThreadPoolExecutor
     import sys
     # progress status (Round 23): a status line every few seconds while the runs execute (as UltraNest's). The compiled
@@ -1253,6 +1260,19 @@ def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=
     # keep running meanwhile: the compiled runs release the GIL)
     from concurrent.futures import wait, FIRST_COMPLETED
     inflight = {}                                # future -> (nsteps, its own stop flag)
+    submitted = {}                               # ordered: arm nsteps -> run indices in submission order (not released)
+    pending = {}                                 # ordered: arm nsteps -> {index: finished run waiting for its turn}
+
+    def release(ns_):
+        lst, pend = submitted.get(ns_, []), pending.get(ns_, {})
+        while lst and lst[0] in pend:
+            r_ = pend.pop(lst.pop(0))
+            arms.setdefault(ns_, []).append(r_)
+            arms[ns_].sort(key=lambda q: q["seed"])
+
+    def forget(ns_):
+        submitted.pop(ns_, None)
+        pending.pop(ns_, None)
     passed = False
     n_aborted = [0]
     n_obsolete = [0]                             # runs aborted at an escalation (their arm was dropped)
@@ -1269,8 +1289,8 @@ def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=
             nonlocal nxt
             while len(inflight) < threads:
                 Nc = max(1, N // 2)
-                nR = len(arms.get(N, [])) + sum(v[0] == N for v in inflight.values())
-                nC = len(arms.get(Nc, [])) + sum(v[0] == Nc for v in inflight.values())
+                nR = (len(arms.get(N, [])) + len(pending.get(N, {})) + sum(v[0] == N for v in inflight.values()))
+                nC = (len(arms.get(Nc, [])) + len(pending.get(Nc, {})) + sum(v[0] == Nc for v in inflight.values()))
                 ns = Nc if (check and nC < nR) else N
                 while nxt in used:                # smallest free index (fills the gaps left by a crash)
                     nxt += 1
@@ -1278,6 +1298,8 @@ def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=
                 used.add(idx)
                 sd = seed + 1000 * idx
                 flag = np.zeros(3, dtype=np.int64)      # [stop request, calls, iterations] (progress)
+                if ordered:
+                    submitted.setdefault(ns, []).append(idx)
                 inflight[ex.submit(run, ll_u, ndim, wrapped=wrapped, nlive=nlive, nsteps=ns, k=1, seed=sd, dirs=dirs,
                                    frac_remain=frac_remain, kpair=kpair, stop=flag,
                                    recluster=recluster, data=data)] = (ns, flag, idx)
@@ -1287,6 +1309,8 @@ def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=
             dropped_idx = []
             for ns_ in list(arms):
                 dropped_idx += [int(r.get("idx", -1)) for r in arms.pop(ns_)]
+            for ns_ in list(submitted) + list(pending):
+                forget(ns_)
             for f, (ns, flag, i_) in inflight.items():
                 flag[0] = 1
                 n_obsolete[0] += 1
@@ -1302,6 +1326,7 @@ def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=
                 say(f"  fit: nsteps {N} vs {max(1, N // 2)} disagree -> nsteps {2 * N}")
             dropped = max(1, N // 2)
             dropped_idx = [int(r.get("idx", -1)) for r in arms.pop(dropped, [])]
+            forget(dropped)
             N *= 2
             nesc += 1
             # runs of the dropped arm (old N / 2) still in flight are useless: abort them now
@@ -1352,17 +1377,27 @@ def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=
                 r.pop("samples_u", None)
                 ncall_tot[0] += r["ncall"]
                 if _flag[0] != 0:                # aborted (dropped arm): incomplete, never used
+                    if ordered and int(idx) in submitted.get(ns, []):
+                        submitted[ns].remove(int(idx))
+                        release(ns)
                     ndone += 1
                     continue
                 if (ns == N or (check and ns == max(1, N // 2))) and r["nlive"] == nlive:
                     r["idx"] = int(idx)
                     if callback is not None:
                         callback("run", r=r, nsteps=ns, idx=idx)
-                    # kept sorted by seed (Round 14): merges, split halves and KS depend only on WHICH runs are
-                    # done, not on the order in which they finished (Round 13: KS arms 0.049 vs 0.053 for the same
-                    # runs in a different order flipped an escalation at ks_tol 0.05)
-                    arms.setdefault(ns, []).append(r)
-                    arms[ns].sort(key=lambda q: q["seed"])
+                    if ordered:
+                        pending.setdefault(ns, {})[int(idx)] = r
+                        release(ns)
+                    else:
+                        # kept sorted by seed (Round 14): merges, split halves and KS depend only on WHICH runs are
+                        # done, not on the order in which they finished (Round 13: KS arms 0.049 vs 0.053 for the
+                        # same runs in a different order flipped an escalation at ks_tol 0.05)
+                        arms.setdefault(ns, []).append(r)
+                        arms[ns].sort(key=lambda q: q["seed"])
+                elif ordered and int(idx) in submitted.get(ns, []):
+                    submitted[ns].remove(int(idx))     # a run of a stale n_live: it never blocks the prefix
+                    release(ns)
                 ndone += 1
             top_up()                             # refill before the (slow, Python) evaluation
             if len(arms.get(N, [])) < 2:
@@ -1418,7 +1453,7 @@ def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=
     mixm = np.mean([r["mix"] for r in R], axis=0)
     return dict(mix=mixm, logz=lzm, logzerr=hist[-1]["logz_err"], logzerr_boot=lzb, samples_u=samples, ess=ess,
                 runs=R, n_failed=len(bad), n_aborted=n_aborted[0], n_obsolete=n_obsolete[0], n_eval=n_eval[0],
-                n_eval_pre=n_eval[1], t_eval=t_eval[0], t_compile=t_compile, runs_check=arms.get(max(1, N // 2), []) if check else [], history=hist, passed=passed,
+                n_eval_pre=n_eval[1], t_eval=t_eval[0], t_compile=t_compile, ordered=bool(ordered), runs_check=arms.get(max(1, N // 2), []) if check else [], history=hist, passed=passed,
                 wall=time.perf_counter() - t0, ncall=hist[-1]["ncall"], nlive=nlive, nlive0=nlive0,
                 n_nlive_escalations=nlesc, multimodal=multimodal[0], nsteps=N, nsteps0=nsteps,
                 n_escalations=nesc, dlnz_check=hist[-1].get("dlnz"), dlnz_check_err=hist[-1].get("dlnz_err"),
