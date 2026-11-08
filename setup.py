@@ -24,8 +24,8 @@ setup(
     license='GPL3',
     zip_safe=False,
     include_package_data=True,
-    package_data={'': ['*.csv', '*.cfg']},
-    packages=['pandoramoon'],
+    package_data={'': ['*.csv', '*.cfg', '*.cu']},
+    packages=['pandoramoon', 'pandoramoon.gpu'],
     install_requires=[
         'numpy>=1.21',
         'numba>=0.54',
@@ -34,5 +34,7 @@ setup(
         # videos (model.video) and plots (plot_run, plot_corner); prepare_lightcurve needs wotan
         'plots': ['matplotlib', 'tqdm', 'corner'],
         'search': ['wotan'],
+        # optional FP32 GPU backend (NVIDIA, compute capability >= 7.0; experimental, GPU_PLAN.md)
+        'gpu': ['numba-cuda', 'cuda-core', 'cuda-bindings', 'nvidia-cuda-nvrtc'],
         },
 )

@@ -1,0 +1,170 @@
+"""Batched FP32 planet+moon log-likelihood on the GPU (GPU_PLAN.md phase 2; model: model.cu, GPU_MODEL.md).
+
+    from pandoramoon.gpu import GPULikelihood
+    G = GPULikelihood(like, t0_ref=t0_bary)       # like: a pandoramoon.Likelihood (as the sampler uses it)
+    logl = G(theta)                                # theta: (n, 20) Pandora parameters (pandora_loglike's order)
+
+Scope of v1 (anything else raises ValueError; the CPU path handles it): circular planet and moon orbits
+(ecc_bary = ecc_moon = 0), sorted time, no occultation cache, occult_small_threshold = 0 (exact moon transit),
+supersampled time as Likelihood stores it (len(time) = supersampling_factor x cadences), r_planet and r_moon
+inside the occultation tables' k-range.
+"""
+import numpy as np
+
+from pandoramoon.gpu import _cuda
+
+# k-ranges of the interpolant tables (occult.LIMB_TAB_*, INT_TAB_*): the GPU has no per-call exact build
+K_MIN = 5e-4
+K_MAX = 0.25
+
+
+def _two_float(x):
+    hi = x.astype(np.float32)
+    lo = (x - hi.astype(np.float64)).astype(np.float32)
+    return hi, lo
+
+
+class GPULikelihood:
+    def __init__(self, like, t0_ref, warps=4, minb=8, extra=()):
+        from numba import cuda
+        if like.cache is not None:
+            raise ValueError("GPULikelihood: the occultation cache is not supported (pass cache=None)")
+        if not like.time_sorted:
+            raise ValueError("GPULikelihood: time must be ascending")
+        if like.occult_small_threshold != 0:
+            raise ValueError("GPULikelihood: occult_small_threshold must be 0 (exact moon transit)")
+        ss = int(like.supersampling_factor)
+        t = np.asarray(like.time, dtype=np.float64)
+        nc = len(like.inv_var)
+        if len(t) != ss * nc:
+            raise ValueError("GPULikelihood: len(time) must be supersampling_factor x the number of cadences")
+        self.like = like
+        self.ss = ss
+        self.nc = nc
+        self.warps = int(warps)
+        self.t0_ref = float(t0_ref)
+        ed = float(like.epoch_distance)
+        self.ed = ed
+        tc = t.reshape(nc, ss).mean(axis=1)
+        n_abs = np.floor((tc - self.t0_ref) / ed + 0.5).astype(np.int64)
+        ue = np.unique(n_abs)
+        ep = np.searchsorted(ue, n_abs).astype(np.int32)
+        te = np.array([0.5 * (tc[ep == i].min() + tc[ep == i].max()) for i in range(len(ue))])
+        self.te = te
+        self.n_epoch = ue
+        dt = t - np.repeat(te[ep], ss)
+        dtr = dt.reshape(nc, ss)
+        self.hspan = np.float32(np.abs(dtr - dtr[:, ss // 2:ss // 2 + 1]).max() * (1 + 1e-6) + 1e-12)
+        ehi, elo = _two_float(te - te[0])
+        self.d = dict(
+            DT=cuda.to_device(dt.astype(np.float32)),
+            EP=cuda.to_device(ep),
+            EDT=cuda.to_device((te - self.t0_ref - ed * ue).astype(np.float32)),
+            EN=cuda.to_device(ue.astype(np.float32)),
+            EHI=cuda.to_device(ehi), ELO=cuda.to_device(elo),
+            IV=cuda.to_device(np.asarray(like.inv_var, dtype=np.float32)),
+            LN=cuda.to_device((1.0 - np.asarray(like.data, dtype=np.float64)).astype(np.float32)))   # E = 1 - data
+        self.mod = _cuda.module(ss, warps, minb, extra)
+        a = self.mod.get_kernel("loglike").attributes
+        self.regs, self.local_bytes = a.num_regs, a.local_size_bytes
+        self.kernel = self.mod.get_kernel("loglike")
+        self.kernel_fix = self.mod.get_kernel("limb_fix")
+        self.fix_blocks = 4 * cuda.get_current_device().MULTIPROCESSOR_COUNT
+        self._q = None             # limb-eclipse queue (capacity qpercall() x the largest batch so far)
+        self._pc = self._co = None  # per-call setup and coefficients for limb_fix
+        self.dQN = cuda.to_device(np.zeros(1, np.int32))
+        self.dDONE = cuda.to_device(np.zeros(1, np.uint32))
+        self.LT, self.IT = _cuda.tables()
+
+    def check_theta(self, theta):
+        """the v1 scope for a batch of parameter vectors (raises ValueError)"""
+        th = np.asarray(theta)
+        if np.any(th[:, 8] != 0) or np.any(th[:, 17] != 0):
+            raise ValueError("GPULikelihood v1: circular orbits only (ecc_bary = ecc_moon = 0)")
+        for col, name in ((5, "r_planet"), (12, "r_moon")):
+            v = th[:, col]
+            on = v > 0
+            if np.any((v[on] < K_MIN) | (v[on] > K_MAX)):
+                raise ValueError(f"GPULikelihood v1: {name} outside [{K_MIN}, {K_MAX}] (occultation tables)")
+
+    def qpercall(self):
+        """queue entries per call: an upper bound on the limb-eclipse cadences of one call"""
+        return int(min(self.nc, 64 + 8 * len(self.te)))
+
+    def loglike_device(self, dTH, n, dOUT, dNLIMB=None, fix=True, main=True):
+        """launch on device arrays: dTH (n, 20) float64 -> dOUT (n,) float64 (no sync). Two kernels: loglike
+        (every cadence without a limb eclipse; those are queued) and limb_fix (the queued cadences). A call whose
+        queue entries did not fit gets NaN (never observed: QPERCALL entries per call)."""
+        from numba import cuda
+        d = self.d
+        L = self.like
+        if self._q is None or self._q.shape[0] < self.qpercall() * n:
+            self._q = cuda.device_array((self.qpercall() * n, 2), np.int32)
+        if self._pc is None or self._pc.shape[0] < n:
+            self._pc = cuda.device_array((n, 32), np.float32)        # CallP (<= 128 bytes) per call
+            self._co = cuda.device_array((n, 4, 36), np.float32)     # coefficient rows per call
+        qcap = np.int32(self._q.shape[0])
+        grid = (n + self.warps - 1) // self.warps
+        if main:
+            _cuda.launch(self.kernel, grid, 32 * self.warps,
+                         _cuda.ptr(dTH), np.int32(n),
+                         _cuda.ptr(d["DT"]), _cuda.ptr(d["EP"]), _cuda.ptr(d["EDT"]), _cuda.ptr(d["EN"]),
+                         _cuda.ptr(d["EHI"]), _cuda.ptr(d["ELO"]), _cuda.ptr(d["IV"]), _cuda.ptr(d["LN"]),
+                         np.int32(self.nc), np.float64(self.t0_ref), np.float64(self.te[0]), np.float64(self.ed),
+                         np.float32(L.hill_sphere_threshold), np.float32(self.hspan),
+                         _cuda.ptr(self.LT), _cuda.ptr(self.IT), _cuda.ptr(dOUT), _cuda.ptr(dNLIMB),
+                         _cuda.ptr(self._q), _cuda.ptr(self.dQN), qcap, _cuda.ptr(self._pc), _cuda.ptr(self._co))
+        if not fix:
+            return
+        _cuda.launch(self.kernel_fix, self.fix_blocks, 128,
+                     _cuda.ptr(d["DT"]), _cuda.ptr(d["EP"]), _cuda.ptr(d["EDT"]), _cuda.ptr(d["EN"]),
+                     _cuda.ptr(d["EHI"]), _cuda.ptr(d["ELO"]), _cuda.ptr(d["IV"]), _cuda.ptr(d["LN"]),
+                     _cuda.ptr(dOUT), _cuda.ptr(self._q), _cuda.ptr(self.dQN), qcap, _cuda.ptr(self._pc),
+                     _cuda.ptr(self._co), _cuda.ptr(self.dDONE))
+
+    def __call__(self, theta, check=True, return_nlimb=False):
+        from numba import cuda
+        th = np.ascontiguousarray(theta, dtype=np.float64)
+        if th.ndim == 1:
+            th = th[None, :]
+        if check:
+            self.check_theta(th)
+        n = th.shape[0]
+        dTH = cuda.to_device(th)
+        dOUT = cuda.device_array(n, np.float64)
+        dNL = cuda.device_array(n, np.int32) if return_nlimb else None
+        self.loglike_device(dTH, n, dOUT, dNL)
+        cuda.synchronize()
+        out = dOUT.copy_to_host()
+        if np.isnan(out).any():
+            raise RuntimeError("GPULikelihood: limb-eclipse queue overflow (qpercall)")
+        if return_nlimb:
+            return out, dNL.copy_to_host()
+        return out
+
+
+def deficit(k, u1, u2, z2):
+    """component test: the GPU deficit of one body at squared distances z2 (float32)"""
+    from numba import cuda
+    mod = _cuda.module(1)
+    LT, IT = _cuda.tables()
+    z2 = np.ascontiguousarray(z2, dtype=np.float32)
+    dZ = cuda.to_device(z2)
+    dO = cuda.device_array(len(z2), np.float32)
+    _cuda.launch(mod.get_kernel("t_deficit"), 1, 32, np.float32(k), np.float32(u1), np.float32(u2), _cuda.ptr(dZ),
+                 np.int32(len(z2)), _cuda.ptr(LT), _cuda.ptr(IT), _cuda.ptr(dO))
+    cuda.synchronize()
+    return dO.copy_to_host()
+
+
+def er3(X):
+    """component test: er = min(1, A(star & planet & moon) / A(star & moon)) at rows (xp, yp, rp, xm, ym, rm)"""
+    from numba import cuda
+    mod = _cuda.module(1)
+    X = np.ascontiguousarray(X, dtype=np.float32)
+    m = X.shape[0]
+    dX = cuda.to_device(X.ravel())
+    dO = cuda.device_array(m, np.float32)
+    _cuda.launch(mod.get_kernel("t_er3"), (m + 127) // 128, 128, _cuda.ptr(dX), np.int32(m), _cuda.ptr(dO))
+    cuda.synchronize()
+    return dO.copy_to_host()
