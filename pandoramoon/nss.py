@@ -1012,7 +1012,7 @@ def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=
         max_runs=None, ks_tol=0.05, lz_tol=0.1, seed=1, dirs="pairs", frac_remain=0.01, verbose=True,
         post_map=None, kpair=4, check=True, max_nsteps=None, recluster=0.25, data=None,
         accuracy=None, resume=None, callback=None, max_nlive=None, progress=False, progress_label="fit",
-        backend="cpu", gpu=None, ordered=None):
+        backend="cpu", gpu=None, ordered=True):
     """Nested sampling with built-in convergence checks.
 
     Independent serial nss runs (n_live = nlive each) run in parallel threads and are merged as one run
@@ -1062,7 +1062,7 @@ def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=
     pool's number of slots. Every GPU run replaces k = min(64, n_live / 8) points per iteration (parallel nested
     sampling) instead of 1.
 
-    ordered (default: True for backend="gpu", False for "cpu"): a finished run enters its arm only when every run
+    ordered (default True; False = the behaviour before 2026-11-08): a finished run enters its arm only when every run
     submitted before it to that arm has finished, so the runs used are a complete prefix in submission order. Without
     it the runs in use are the first to FINISH, and a run's length is strongly anticorrelated with its lnZ
     (tutorial: corr(lnZ, iterations) = -0.95; the shortest half of 64 runs +0.41 nats above all 64, GPU_LOG Round 6):
@@ -1313,8 +1313,6 @@ def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=
     # keep running meanwhile: the compiled runs release the GIL)
     from concurrent.futures import wait, FIRST_COMPLETED
     inflight = {}                                # future -> (nsteps, its own stop flag)
-    if ordered is None:
-        ordered = backend == "gpu"
     submitted = {}                               # ordered: arm nsteps -> run indices in submission order (not released)
     pending = {}                                 # ordered: arm nsteps -> {index: finished run waiting for its turn}
 
