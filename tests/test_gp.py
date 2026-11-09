@@ -395,6 +395,12 @@ def _gpu_check(name, L, pri, ss, t0_ref, truth):
     dLLK = cuda.device_array(n, np.float64)
     ev.evaluate(dU, dACT, n, dLW, dLLK)
     got = dLLK.copy_to_host()
+    ev.like.gp_budget = 1                   # large batches in parts (the rejection init's 100 000 draws): 4 x 1024
+    ev.evaluate(dU, dACT, n, dLW, dLLK)
+    parts = dLLK.copy_to_host()
+    ev.like.gp_budget = type(ev.like).gp_budget
+    check(f"GPU: a batch in parts = one launch ({name}, supersampling {ss})",
+          bool(np.array_equal(np.nan_to_num(parts, neginf=-1.0), np.nan_to_num(got, neginf=-1.0))))
     ref = np.array([S.likelihood(*th[i]) if ok[i] else -np.inf for i in range(n)])
     # random prior points are poor fits (logL -1e5 ... -2e4): FP32 rounding of the large terms, relative
     # (GPU_LOG Round 9: at posterior points the error is 3e-4 nats median, 1.2e-3 max, below the white-noise path's)

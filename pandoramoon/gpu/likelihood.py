@@ -183,10 +183,31 @@ class GPULikelihood:
         """queue entries per call: an upper bound on the limb-eclipse cadences of one call"""
         return int(min(self.nc, 64 + 8 * len(self.te)))
 
+    gp_budget = 512 * 2 ** 20        # bytes of the GP build's per-call buffers (gp_chunk_calls)
+
+    def gp_chunk_calls(self):
+        """GP build: the largest batch whose per-call buffers (deficits per cadence, epoch windows and runs, the
+        limb-eclipse queue, set-up) stay within gp_budget bytes; larger batches are launched in parts"""
+        ne = len(self.te)
+        per = 4 * self.nc + 8 * ne + 16 * ne + 8 * self.qpercall() + 4 * 4 * 36 + 128
+        return max(1024, int(self.gp_budget // per))
+
     def loglike_device(self, dTH, n, dOUT, dNLIMB=None, fix=True, main=True, dACT=None):
         """launch on device arrays: dTH (n, 20) float64 -> dOUT (n,) float64 (no sync). Two kernels: loglike
         (every cadence without a limb eclipse; those are queued) and limb_fix (the queued cadences). A call whose
-        queue entries did not fit gets NaN (never observed: QPERCALL entries per call)."""
+        queue entries did not fit gets NaN (never observed: QPERCALL entries per call). The GP build launches
+        large batches (e.g. the rejection init's 100 000 draws) in parts of gp_chunk_calls()."""
+        if self.gp and main and fix and n > self.gp_chunk_calls():
+            m = self.gp_chunk_calls()
+            for i0 in range(0, n, m):
+                i1 = min(n, i0 + m)
+                self._loglike_device(dTH[i0:i1], i1 - i0, dOUT[i0:i1],
+                                     None if dNLIMB is None else dNLIMB[i0:i1], True, True,
+                                     None if dACT is None else dACT[i0:i1])
+            return
+        self._loglike_device(dTH, n, dOUT, dNLIMB, fix, main, dACT)
+
+    def _loglike_device(self, dTH, n, dOUT, dNLIMB, fix, main, dACT):
         from numba import cuda
         d = self.d
         L = self.like
