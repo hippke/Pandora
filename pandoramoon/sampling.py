@@ -52,6 +52,7 @@ from numba import njit
 
 from pandoramoon import nss
 from pandoramoon.kernel import pandora_loglike, pandora_loglike_planet, PLANET_ONLY_MOON
+from pandoramoon.gp import pandora_loglike_gp, pandora_loglike_planet_gp
 from pandoramoon.reparam import min_physical_period
 
 from pandoramoon.constants import R_SUN  # noqa: E402  (physics.cfg)
@@ -320,6 +321,23 @@ def _loglike(u, D):
 
 
 @njit(cache=True)
+def _loglike_gp(u, D):
+    """_loglike with the simultaneous GP (Likelihood(gp=...)): D has the GP tables appended (24-31: F, K, irs, e,
+    W, v, c0, ld of pandoramoon.gp.gp_setup)"""
+    th, lw = _theta(u, D)
+    if not lw > LOGZERO:
+        return LOGZERO
+    if D[9] == 0:
+        return lw + pandora_loglike_planet_gp(th[0], th[1], th[2], th[3], th[4], th[5], th[6], th[7], th[8], th[9],
+                                              th[10], th[11], D[0], D[1], D[2], D[3], D[4], D[24], D[25], D[26],
+                                              D[27], D[28], D[29], D[30], D[31], None, D[8])
+    return lw + pandora_loglike_gp(th[0], th[1], th[2], th[3], th[4], th[5], th[6], th[7], th[8], th[9], th[10],
+                                   th[11], th[12], th[13], th[14], th[15], th[16], th[17], th[18], th[19], D[0], D[1],
+                                   D[2], D[3], D[4], D[24], D[25], D[26], D[27], D[28], D[29], D[30], D[31], None,
+                                   D[8])
+
+
+@njit(cache=True)
 def _thetas(U, D):
     n = U.shape[0]
     out = np.empty((n, 20))
@@ -507,6 +525,12 @@ class _Model:
                   int(ld_mode), np.array(ld_c, dtype=np.int64), np.array(ld_par, dtype=np.float64),
                   int(mp), np.array(mp_c, dtype=np.int64), np.ascontiguousarray(CDF, dtype=np.float64),
                   np.array(mp_f, dtype=np.float64), int(pm_k), np.array(pm_par, dtype=np.float64))
+        # the compiled log-likelihood nss samples: white noise, or the simultaneous GP (its tables appended to D)
+        self.ll = _loglike
+        if getattr(like, "gp", None) is not None:
+            g = like.gp_tables
+            self.D = self.D + (g[0], g[1], g[2], g[3], g[4], g[5], float(g[6]), float(g[7]))
+            self.ll = _loglike_gp
 
     @staticmethod
     def _ld_p_inside(spec, ld_mode, ld_par, n=4_000_000):
@@ -621,7 +645,8 @@ def _jsonable(x):
 
 _RUN_SCALARS = ("seed", "nlive", "logz", "logzerr", "H", "ncall", "niter", "wall", "wall_init", "ess", "maxL",
                 "final_scale", "expand_rate", "nrecluster", "dirs",
-                "insertion", "logx0", "init_acc", "init_draws", "n_plateau", "nstuck", "nmaxexp")
+                "insertion", "logx0", "init_acc", "init_draws", "n_plateau", "nstuck", "nmaxexp",
+                "k", "nsteps", "device")          # k: points replaced per iteration (nss.merge_weights needs it)
 
 
 def _save_run(path, r):
@@ -756,7 +781,7 @@ def _fit_model(m, nss_kw, store, resume_mode, settings_hash, verbose, label, max
     def post_map(U):
         return m.to_params(U)
     t0 = time.perf_counter()
-    r = nss.fit(_loglike, m.ndim, wrapped=m.wrapped, data=m.D, post_map=post_map, verbose=verbose, resume=resume,
+    r = nss.fit(m.ll, m.ndim, wrapped=m.wrapped, data=m.D, post_map=post_map, verbose=verbose, resume=resume,
                 callback=callback, progress=progress, progress_label=f"{label} model", **nss_kw)
     wall = time.perf_counter() - t0
     names = m.paramnames()
@@ -870,10 +895,10 @@ def _fit_model_is(m, nss_kw, verbose, label, max_weighted=None):
     if verbose:
         print(f"  {label}: evidence by importance sampling (planet_evidence='is')", flush=True)
     t0 = time.perf_counter()
-    nss.make_sampler(_loglike, False, True)          # the serial sampler (shared with the nested-sampling fits)
-    nss.make_batch(_loglike, True)
+    nss.make_sampler(m.ll, False, True)              # the serial sampler (shared with the nested-sampling fits)
+    nss.make_batch(m.ll, True)
     t_compile = time.perf_counter() - t0
-    r = nss.fit_is(_loglike, m.ndim, wrapped=m.wrapped, data=m.D, threads=nss_kw.get("threads", 1),
+    r = nss.fit_is(m.ll, m.ndim, wrapped=m.wrapped, data=m.D, threads=nss_kw.get("threads", 1),
                    seed=nss_kw.get("seed", 1), lz_tol=lz_tol, verbose=verbose)
     if not r["ok"]:
         return None, r
@@ -933,6 +958,8 @@ def _data_hash(like):
     for a in (like.time, like.inv_var, like.lin_terms):
         h.update(np.ascontiguousarray(a).tobytes())
     h.update(repr(like._tail[:4] + (like._tail[7],) + like._tail[9:]).encode())
+    if getattr(like, "gp", None) is not None:
+        h.update(repr(like.gp.key()).encode())
     return h.hexdigest()
 
 
@@ -956,13 +983,20 @@ class NestedSampler:
         uses 5 sub-exposures per cadence (exposure = cadence; SAMPLING.md Round 16: without it the Bayes factor and the
         moon parameters of 30-min data are biased); an integer: that many sub-exposures; None: the likelihood as given.
         (To control the exposure time, pass a likelihood that is already supersampled.)
+    device: "cpu" (default) or "gpu" (the planet+moon fit on an NVIDIA GPU, pandoramoon.gpu; the planet-only fit
+        stays on the CPU and runs concurrently). gpu_options: keyword arguments of pandoramoon.gpu.sampler.GPURunPool
+        (e.g. slots, k) for device="gpu".
     """
 
     def __init__(self, likelihood, priors, model="moon", compare_planet=True, moon_phase="auto", ld_correlation=0.0,
                  log_dir=None, resume="subfolder", threads=None, seed=1, verbose=True, supersampling="auto",
-                 planet_evidence="is"):
+                 planet_evidence="is", device="cpu", gpu_options=None):
         if model not in ("moon", "planet"):
             raise ValueError('model must be "moon" or "planet"')
+        if device not in ("cpu", "gpu"):
+            raise ValueError('device must be "cpu" or "gpu"')
+        self.device = device
+        self.gpu_options = dict(gpu_options or {})
         if resume not in ("subfolder", "resume", "overwrite"):
             raise ValueError('resume must be "subfolder", "resume" or "overwrite"')
         self.supersampling_note = None
@@ -1019,6 +1053,22 @@ class NestedSampler:
         self.results = None
         self._check_priors()
 
+    def _gpu_evaluator(self, m):
+        """the planet+moon model's unit-cube likelihood on the GPU (pandoramoon.gpu)"""
+        from pandoramoon import gpu
+        from pandoramoon.gpu.sampler import PandoraEvaluator
+        if not gpu.available():
+            raise RuntimeError('device="gpu": no usable NVIDIA GPU / CUDA Python packages (pip install pandoramoon[gpu])')
+        if getattr(self.likelihood, "gp", None) is not None and not getattr(gpu, "GP_SUPPORTED", False):
+            raise NotImplementedError('device="gpu" with Likelihood(gp=...) is not implemented yet; use device="cpu"')
+        p = self.priors.get("t0_bary")
+        if isinstance(p, Prior):
+            lo, hi = p.support()
+            t0_ref = 0.5 * (lo + hi)
+        else:
+            t0_ref = float(p)
+        return PandoraEvaluator(m, self.likelihood, t0_ref=t0_ref)
+
     def _check_priors(self):
         """sanity check: the prior must not be mostly outside Pandora's valid parameter range"""
         rng = np.random.default_rng(0)
@@ -1039,6 +1089,8 @@ class NestedSampler:
         sub = {k: hashlib.sha1(np.ascontiguousarray(a).tobytes()).hexdigest()[:12]
                for k, a in (("time", L.time), ("inv_var", L.inv_var), ("lin_terms", L.lin_terms))}
         sub["tail"] = hashlib.sha1(repr(L._tail[:4] + (L._tail[7],) + L._tail[9:]).encode()).hexdigest()[:12]
+        if getattr(L, "gp", None) is not None:
+            sub["gp"] = hashlib.sha1(repr(L.gp.key()).encode()).hexdigest()[:12]
         return dict(data=_data_hash(self.likelihood), data_parts=sub,
                     priors=hashlib.sha1(repr(sorted((k, repr(v)) for k, v in m.spec.items())).encode()).hexdigest(),
                     settings=hashlib.sha1(repr((name, m.moon_phase, self.ld_correlation, self.seed,
@@ -1066,7 +1118,8 @@ class NestedSampler:
         kw.update(nss_kw)
         out = {}
         order = [n for n in ("planet", "moon") if n in self.models]
-        for name in order:
+
+        def fit_one(name):
             m = self.models[name]
             path = None
             if self.log_dir is not None:
@@ -1077,19 +1130,37 @@ class NestedSampler:
                       f"({', '.join(m.cube_names)})", flush=True)
             mode = self.resume if self.resume == "resume" else "fresh"
             kh = {k: v for k, v in kw.items() if k != "threads"}
+            if self.device == "gpu" and name == "moon":
+                kh["device"] = "gpu"                 # GPU runs (k > 1 per iteration) are stored apart from CPU runs
             hs, hparts = self._settings_hash(name, kh), self._hash_parts(name, kh)
             done = False
             if name == "planet" and self.planet_evidence == "is" and not any(m.wrapped):
                 res_is, info = _fit_model_is(m, kw, self.verbose, name, max_weighted=max_weighted_samples)
                 if res_is is not None:
-                    out[name] = res_is
+                    return_value = res_is
                     done = True
                 elif self.verbose:
                     print(f"  {name}: importance sampling not used ({info.get('reason')}): nested-sampling fit",
                           flush=True)
             if not done:
-                out[name] = _fit_model(m, kw, store, mode, hs, self.verbose, name, max_weighted=max_weighted_samples,
+                kw_m = kw
+                if self.device == "gpu" and name == "moon":
+                    kw_m = dict(kw, backend="gpu", gpu=dict(self.gpu_options, evaluator=self._gpu_evaluator(m)))
+                return_value = _fit_model(m, kw_m, store, mode, hs, self.verbose, name, max_weighted=max_weighted_samples,
                                        progress=self.verbose if progress is None else progress, hash_parts=hparts)
+
+            return return_value
+
+        if self.device == "gpu" and order == ["planet", "moon"]:
+            # the planet-only model (CPU) concurrently with the planet+moon model (GPU)
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=1) as ex_pl:
+                f_pl = ex_pl.submit(fit_one, "planet")
+                out["moon"] = fit_one("moon")
+                out["planet"] = f_pl.result()
+        else:
+            for name in order:
+                out[name] = fit_one(name)
         res = out[self.model]
         if self.model == "moon" and "planet" in out:
             pl = out["planet"]

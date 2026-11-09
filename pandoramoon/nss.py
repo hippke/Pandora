@@ -575,7 +575,7 @@ def run(ll_u, ndim, wrapped=None, nlive=1000, nsteps=None, K=None, k=1, frac_rem
     pos = (rng.uniform() + np.arange(nsamp)) / nsamp
     samples = dU[np.searchsorted(cw, pos)]
     insd = insertion_test(ins, nlive - k, nlive, seed)
-    return dict(seed=int(seed), nlive=int(nlive), ins_u=((ins + np.random.default_rng(seed + 11).uniform(size=len(ins))) / (nlive - k + 1)
+    return dict(seed=int(seed), nlive=int(nlive), k=int(k), ins_u=((ins + np.random.default_rng(seed + 11).uniform(size=len(ins))) / (nlive - k + 1)
                                        ).astype(np.float32), mix=mix, insertion=insd, logz=logz, logzerr=math.sqrt(max(H, 0.0) / nlive), H=H, ncall=int(ncall) + ninit, niter=int(it),
                 wall=t2 - t0, wall_init=t1 - t0, samples_u=samples, ess=ess, dead_u=dU, dead_L=dL, logw=dlogw,
                 maxL=float(dL.max()), final_scale=scale, expand_rate=exp_rate,
@@ -788,25 +788,42 @@ def fit_is(ll_u, ndim, wrapped=None, data=None, threads=12, seed=1, lz_tol=0.2, 
 
 def merge_weights(rs):
     """Merge independent runs into ONE nested-sampling run (Skilling 2006 Sect. 9; Higson et al. 2018,
-    dynesty merge_runs): all points sorted by logL; the number of live points just before point j is
-    N_live = sum n_i minus the final live points (of any run) already passed; the shrinkage per point
-    is exp(-1/N_live) as in run(). The live count only drops at final live points (a dead point of a
-    run is replaced by a new one of the same run). Returns (logZ, ln w + ln L per point, order)."""
-    Ls, fl = [], []
-    for r in rs:
-        n = r.get("nlive")
+    dynesty merge_runs): all points sorted by logL; the shrinkage at point j is exp(-1/N_live) with N_live the
+    number of live points (all runs) just before it, as in run(). Returns (logZ, ln w + ln L per point).
+
+    Runs that replace k > 1 points per iteration (r["k"]; parallel nested sampling, run(k > 1) and the GPU sampler)
+    remove each batch of k points before its replacements arrive (all above the batch's highest logL): while it
+    removes the j-th point of a batch, such a run has n - j live points, and n again after the batch. Each run's live
+    count is tracked through the merged sequence; for k = 1 (fit()'s CPU runs) it is the earlier rule (the count
+    drops only at final live points). The k > 1 bookkeeping matters: treating a k = 62, n = 500 run as k = 1 raised
+    the merged lnZ by ~1.3 nats in 400 iterations (GPU_LOG Round 5)."""
+    Ls, owner, pos, fin = [], [], [], []
+    nl0 = 0
+    ks = []
+    for i, r in enumerate(rs):
+        n = int(r.get("nlive"))
+        k = int(r.get("k", 1) or 1)
         L = r["dead_L"]
-        f = np.zeros(len(L), dtype=bool)
-        f[len(L) - n:] = True                   # run() appends its n final live points last
+        nd = len(L) - n                          # dead points; run() appends its n final live points last
         Ls.append(L)
-        fl.append(f)
+        owner.append(np.full(len(L), i, dtype=np.int64))
+        p = np.empty(len(L), dtype=np.int64)
+        p[:nd] = np.arange(nd) % k               # position in its batch (batches are stored ascending, k each)
+        p[nd:] = -1                              # final live point
+        pos.append(p)
+        nl0 += n
+        ks.append(k)
     L = np.concatenate(Ls)
-    f = np.concatenate(fl)
+    own = np.concatenate(owner)
+    pos = np.concatenate(pos)
     o = np.argsort(L, kind="stable")
     Lo = L[o]
-    fo = f[o]
-    ntot = int(f.sum())
-    nl = ntot - (np.cumsum(fo) - fo)            # live points just before removing point j
+    if all(k == 1 for k in ks):
+        fo = pos[o] < 0
+        nl = nl0 - (np.cumsum(fo) - fo)          # live points just before removing point j
+    else:
+        nl = _merged_live_counts(own[o], pos[o], np.array([int(r["nlive"]) for r in rs], dtype=np.int64),
+                                 np.array(ks, dtype=np.int64))
     dlx = 1.0 / nl
     # start volume (Round 19, init_reject): pooled acceptance fraction of the runs' rejection draws, else the mean logx0
     if all(r.get("init_draws", 0) > 0 for r in rs):
@@ -819,6 +836,27 @@ def merge_weights(rs):
     lwl = np.empty(len(L))
     lwl[o] = lw + Lo
     return float(np.logaddexp.reduce(lwl)), lwl
+
+
+@njit(cache=True)
+def _merged_live_counts(own, pos, nlive, ks):
+    """live points (all runs) just before each point of the merged, logL-sorted sequence: a run's count drops by one
+    per removed point, and returns to n_live after the last point of a batch (pos == k - 1); final live points
+    (pos == -1) are not replaced"""
+    live = nlive.copy()
+    tot = 0
+    for i in range(live.shape[0]):
+        tot += live[i]
+    out = np.empty(own.shape[0], dtype=np.float64)
+    for j in range(own.shape[0]):
+        r = own[j]
+        out[j] = tot
+        live[r] -= 1
+        tot -= 1
+        if pos[j] == ks[r] - 1:
+            live[r] += ks[r]
+            tot += ks[r]
+    return out
 
 
 def merge(rs, nsamp=None, seed=0):
@@ -871,25 +909,68 @@ def split_half_ks(rs, sub=40_000, seed=0, post_map=None):
 #   4 better solution? a gap in the runs' lnZ with higher maxL above it: n_live x 2
 # Once rule 3 / 4 sent a fit to more live points, nsteps is never doubled again. The constants are in
 # settings.cfg [fit_rules] (each with its source), read once at import.
+# Rule set r25 (default since GPU_LOG Round 8, 2026-11-09) changes three triggers that escalated needlessly (pools of
+# GPU and CPU runs, sim_rules_gpu.py): rule 4 only for a gap that can bias the merged lnZ (not for a few runs that
+# missed what the majority found), rule 3 from 32 runs on, without single low outlier runs, routed to nsteps also on a
+# significant mean shift between the arms; rule 2's KS tier only on the permutation null's maximum. r23 = before.
 from pandoramoon._config import settings as _settings  # noqa: E402
 
 FIT_RULES = dict(_settings()["fit_rules"])          # settings.cfg [fit_rules] (each value with its source there)
 _FIT = _settings()["fit"]
+_RULE_FLAGS = ("gap_bias", "scatter_runs32", "scatter_clip", "route_dlnz", "ks_hi_only")
+RULE_SETS = {
+    "r23": dict.fromkeys(_RULE_FLAGS, False),
+    "r25": dict.fromkeys(_RULE_FLAGS, True),
+    # r26 (the default since 2026-11-09, GPU_LOG Round 9.1): r25, and an nsteps request passes the multimodal block
+    # once n_live is at max_nlive (where r25 stops "stalled"): SBC draw 4, 16 / 66 runs in flight: 36 / 27 % passed ->
+    # 93 / 79 %; HH22 (the negative control): the same decisions
+    "r26": dict(dict.fromkeys(_RULE_FLAGS, True), unblock="cap"),
+    # the steps of GPU_LOG Round 8 (to reproduce its simulations): v8 = r25
+    "v1": dict(dict.fromkeys(_RULE_FLAGS, False), gap_bias=True),
+    "v4": dict(dict.fromkeys(_RULE_FLAGS, False), gap_bias=True, scatter_runs32=True),
+    "v5": dict(dict.fromkeys(_RULE_FLAGS, False), gap_bias=True, scatter_runs32=True, route_dlnz=True),
+    "v7": dict(dict.fromkeys(_RULE_FLAGS, True), ks_hi_only=False),
+    "v8": dict.fromkeys(_RULE_FLAGS, True),
+    # experimental (GPU_LOG Round 9): when may an nsteps request pass the multimodal block (no nsteps escalation once
+    # n_live was escalated)? "cap": once n_live is at max_nlive (the alternative is the "stalled" stop); "cap_dlnz":
+    # at the cap and the arms' mean lnZ differ by > route_dlnz_sig sigma; "dlnz": that difference at any n_live
+    "u1": dict(dict.fromkeys(_RULE_FLAGS, True), unblock="cap"),
+    "u2": dict(dict.fromkeys(_RULE_FLAGS, True), unblock="cap_dlnz"),
+    "u3": dict(dict.fromkeys(_RULE_FLAGS, True), unblock="dlnz"),
+    "u3r23": dict(dict.fromkeys(_RULE_FLAGS, False), unblock="dlnz"),     # stress test: r23 (frequent n_live x 2)
+    "u1r23": dict(dict.fromkeys(_RULE_FLAGS, False), unblock="cap"),
+}
 
 
-def _better_solution_gap(runs, q):
-    """rule 4: the largest gap in the sorted lnZ of the runs exceeds max(gap_quoted x q, gap_nats) and the runs above
-    it reach a higher maximum likelihood (median maxL > gap_maxl higher)"""
+def _gap_split(runs, q):
+    """the largest gap in the sorted lnZ of the runs: (qualifies, gap, number of runs below it). It qualifies if it
+    exceeds max(gap_quoted x q, gap_nats) and the runs above it reach a higher maximum likelihood (median maxL >
+    gap_maxl higher)"""
     FR = FIT_RULES
     o = np.argsort([r["logz"] for r in runs])
     zs = np.array([runs[i]["logz"] for i in o])
     ms = np.array([runs[i]["maxL"] for i in o])
     if len(zs) < 4:
-        return False
+        return False, 0.0, 0
     jg = int(np.argmax(np.diff(zs)))
     gap = float(zs[jg + 1] - zs[jg])
     higher = float(np.median(ms[jg + 1:]) - np.median(ms[:jg + 1])) > FR["gap_maxl"]
-    return bool(higher and gap > max(FR["gap_quoted"] * q, FR["gap_nats"]))
+    return bool(higher and gap > max(FR["gap_quoted"] * q, FR["gap_nats"])), gap, jg + 1
+
+
+def _better_solution_gap(runs, q, lz_tol=None, gap_bias=False):
+    """rule 4: the largest gap in the sorted lnZ of the runs exceeds max(gap_quoted x q, gap_nats) and the runs above
+    it reach a higher maximum likelihood (median maxL > gap_maxl higher).
+    gap_bias (rule set r25): only if the merged lnZ can be biased by more than gap_bias x lz_tol: the m runs below the
+    gap missed the mass above it (a fraction 1 - exp(-gap) of Z), and the merge of the M runs as one run
+    (merge_weights) gives that mass only the (M - m) / M of the live points that found it, a bias of about
+    ln(1 - (m / M) (1 - exp(-gap))). A few runs below a majority that found the solution are harmless (HH22 on the
+    GPU: 1 failed run in a 33-run arm triggered r23 in 25 % of the arms); a minority above the gap is not."""
+    ok, gap, m = _gap_split(runs, q)
+    if not ok or not gap_bias:
+        return ok
+    frac = (m / len(runs)) * (1.0 - math.exp(-gap))
+    return bool(-math.log1p(-min(frac, 1.0 - 1e-12)) > FIT_RULES["gap_bias"] * lz_tol)
 
 
 def failed_runs(rs, dl_max=None, dz_min=None):
@@ -974,7 +1055,7 @@ def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=
         max_runs=None, ks_tol=0.05, lz_tol=0.1, seed=1, dirs="pairs", frac_remain=0.01, verbose=True,
         post_map=None, kpair=4, check=True, max_nsteps=None, recluster=0.25, data=None,
         accuracy=None, resume=None, callback=None, max_nlive=None, progress=False, progress_label="fit",
-        ordered=True):
+        backend="cpu", gpu=None, ordered=True, rules=None):
     """Nested sampling with built-in convergence checks.
 
     Independent serial nss runs (n_live = nlive each) run in parallel threads and are merged as one run
@@ -1019,11 +1100,25 @@ def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=
     flight at a crash are redone with their original seeds), and
     the checks are evaluated before any new run is started (a fit that had passed passes again at once).
 
-    ordered (default True; False = the behaviour of Pandora 2.0): a finished run enters its arm only when every run
+    backend="gpu" (experimental, GPU_PLAN.md): the runs execute on an NVIDIA GPU (pandoramoon.gpu.sampler.GPURunPool,
+    gpu=dict(evaluator=..., pool options)); the arms, rules and results are those above, `threads` becomes the
+    pool's number of slots. Every GPU run replaces k = min(64, n_live / 8) points per iteration (parallel nested
+    sampling) instead of 1.
+
+    ordered (default True; False = the behaviour before 2026-11-08): a finished run enters its arm only when every run
     submitted before it to that arm has finished, so the runs used are a complete prefix in submission order. Without
-    it the runs in use are the first to FINISH, and a run's length is strongly anticorrelated with its lnZ (tutorial:
-    corr(lnZ, iterations) = -0.95; the shortest half of 64 runs is 0.41 nats above all 64): the runs in flight that
-    the stop discards are the long ones, which biased lnZ upwards."""
+    it the runs in use are the first to FINISH, and a run's length is strongly anticorrelated with its lnZ
+    (tutorial: corr(lnZ, iterations) = -0.95; the shortest half of 64 runs +0.41 nats above all 64, GPU_LOG Round 6):
+    runs that start together (the GPU's slots) and a stop that discards the runs in flight bias lnZ upwards.
+
+    rules: the rule set (RULE_SETS): "r26" (default; None = $PANDORA_FIT_RULES or "r26"), "r25" or "r23" (the rules
+    before 2026-11-09). r26 = r25, and once n_live is at max_nlive an nsteps request is no longer blocked by the
+    multimodal flag (r25 stops "stalled" there; GPU_LOG.md Round 9.1). r25 differs from r23 in: rule 4 only for a gap whose runs below it can bias the merged lnZ by more
+    than gap_bias x lz_tol (see _better_solution_gap); rule 3 from scatter_runs_r25 runs on, on the sd without low
+    outlier runs (> scatter_clip_mad MAD-sd below the median, at most gap_bias x lz_tol of the runs), and routed to
+    nsteps also when the arms' mean lnZ differ by more than route_dlnz_sig sigma; rule 2's KS escalation only on the
+    permutation null's maximum (not on its median). Validation: GPU_LOG.md Round 8 (pools of GPU and CPU runs).
+    The v1 ... v8 sets are the steps of that validation (v8 = r25)."""
     from concurrent.futures import ThreadPoolExecutor
     import sys
     # progress status (Round 23): a status line every few seconds while the runs execute (as UltraNest's). The compiled
@@ -1063,10 +1158,25 @@ def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=
         else:
             print(s, flush=True)
 
+    if rules is None:                            # the default; experiments can set it by the environment
+        import os
+        rules = os.environ.get("PANDORA_FIT_RULES", "r26")
+    if rules not in RULE_SETS:
+        raise ValueError(f"rules must be one of {sorted(RULE_SETS)}")
+    RS = RULE_SETS[rules]
     if accuracy is not None:
         a = ACCURACY[accuracy]
         nlive, lz_tol, ks_tol = a["nlive"], a["lz_tol"], a["ks_tol"]
         min_runs = min_runs or a["min_runs"]
+    pool = None
+    if backend == "gpu":
+        from pandoramoon.gpu.sampler import GPURunPool
+        g = dict(gpu or {})
+        ev = g.pop("evaluator")
+        pool = GPURunPool(ev, ndim, wrapped=wrapped, frac_remain=frac_remain, kpair=kpair, recluster=recluster, **g)
+        threads = pool.slots_for(nlive)
+    elif backend != "cpu":
+        raise ValueError('backend must be "cpu" or "gpu"')
     max_runs = max_runs or _FIT["max_runs"]
     nsteps = nsteps or _FIT["nsteps_per_dim"] * ndim
     max_nsteps = max_nsteps or _FIT["max_nsteps_per_dim"] * ndim
@@ -1076,9 +1186,10 @@ def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=
     nlesc = 0
     multimodal = [False]
     tc = time.perf_counter()
-    make_sampler(ll_u, False, data is not None)  # compile once, outside the threads
-    run(ll_u, ndim, wrapped=wrapped, nlive=max(40, 2 * ndim + 8), nsteps=2, k=1, max_iter=3, seed=seed + 999, data=data,
-        dirs=dirs, kpair=min(kpair, 4), init_reject=False)
+    if pool is None:
+        make_sampler(ll_u, False, data is not None)  # compile once, outside the threads
+        run(ll_u, ndim, wrapped=wrapped, nlive=max(40, 2 * ndim + 8), nsteps=2, k=1, max_iter=3, seed=seed + 999,
+            data=data, dirs=dirs, kpair=min(kpair, 4), init_reject=False)
     t_compile = time.perf_counter() - tc         # numba compile (first call per process); not in `wall`
     arms = {}                                    # nsteps -> list of runs
     hist = []
@@ -1150,6 +1261,7 @@ def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=
         gate = max(FR["runs_gate"], min_runs // 2)            # runs per arm before an arm statistic is trusted
         q_run = float(np.mean([r["logzerr"] for r in Rg]))
         h.update(scatter_ratio=float(sR["sd"] / q_run) if q_run > 0 and np.isfinite(sR["sd"]) else np.nan,
+                 scatter_ratio_mad=float(sR["mad_sd"] / q_run) if q_run > 0 and np.isfinite(sR["mad_sd"]) else np.nan,
                  nlive=nlive)
         ok_bias, esc_nsteps, esc_nlive, why = True, False, False, ""
         sC = None
@@ -1176,17 +1288,34 @@ def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=
             own_ok_ = bool(sR["M"] >= min_runs and ks <= ks_tol and sR["err"] <= lz_tol)
             ks_esc = need and (ksa * ksa - hi * hi > ks_tol * ks_tol or
                                (own_ok_ and ksa * ksa - med * med > ks_tol * ks_tol
-                                and min(sR["M"], sC["M"]) >= FR["ks_runs"] * min_runs))
+                                and min(sR["M"], sC["M"]) >= FR["ks_runs"] * min_runs and not RS["ks_hi_only"]))
             dl_esc = (abs(d) - k_sig * sig > FR["bias_esc"] * lz_tol or
                       (own_ok_ and sig <= FR["precise_sigma"] * lz_tol and abs(d) - sig > FR["precise_esc"] * lz_tol))
             if enough and (dl_esc or ks_esc):
                 esc_nsteps, why = True, ("dlnZ" if dl_esc else "KS") + " between the arms"
         # rule 3 (excess scatter): the per-run lnZ scatter far above the quoted sqrt(H/n) -> the runs do not sample
         # alike. If the check arm (N / 2) scatters clearly more, longer chains help (nsteps); else more live points
-        if (sR["M"] >= max(FR["scatter_runs_min"], FR["scatter_runs_x"] * min_runs) and q_run > 0
-                and sR["sd"] > FR["scatter_ratio"] * q_run):
+        sd3 = sR["sd"]
+        if RS["scatter_clip"]:
+            # low outlier runs (> scatter_clip_mad MAD-sd below the median; HH22 on the GPU: 1 run in 128 at -7 nats,
+            # sd 2.80 x quoted with it, 2.1 x without) bias the merged lnZ by at most ~ -m / M: up to gap_bias x lz_tol
+            # of the runs they are left out of the scatter
+            zz = np.array([r["logz"] for r in Rg])
+            if len(zz) > 4 and np.isfinite(sR["mad_sd"]):
+                low = zz < np.median(zz) - FR["scatter_clip_mad"] * sR["mad_sd"]
+                m_low = int(low.sum())
+                if 0 < m_low <= FR["gap_bias"] * lz_tol * len(zz) and len(zz) - m_low > 2:
+                    sd3 = float(np.std(zz[~low], ddof=1))
+        runs3 = max(FR["scatter_runs_min"], FR["scatter_runs_x"] * min_runs)
+        if RS["scatter_runs32"]:
+            runs3 = max(runs3, int(FR["scatter_runs_r25"]))
+        if (sR["M"] >= runs3 and q_run > 0 and sd3 > FR["scatter_ratio"] * q_run):
             falls = bool(sC is not None and sC["M"] >= gate and np.isfinite(sC.get("sd", np.nan))
                          and sC["sd"] >= FR["scatter_falls"] * sR["sd"])
+            if RS["route_dlnz"] and sC is not None and sC["M"] >= gate and np.isfinite(d) and np.isfinite(sig):
+                # the arms' mean lnZ differ (> route_dlnz_sig sigma): chain-length dependence, whatever the sd ratio
+                # says (the ratio of two sd estimates has an uncertainty ~0.26 at 30 runs per arm vs the threshold 1.25)
+                falls = falls or abs(d) > FR["route_dlnz_sig"] * sig
             if falls:
                 esc_nsteps, why = True, "excess scatter that falls with nsteps"
             else:
@@ -1194,12 +1323,24 @@ def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=
         # rule 4 (runs that found a better solution): a gap in the sorted lnZ of all runs of an arm with the runs
         # above it reaching a higher maximum likelihood (far-too-short chains scatter too, but reach the same maxL)
         for runs_ in ((R, C) if check else (R,)):
-            if len(runs_) >= gate and _better_solution_gap(runs_, q_run):
+            if len(runs_) >= gate and _better_solution_gap(runs_, q_run, lz_tol, RS["gap_bias"]):
                 esc_nlive, why = True, "some runs found a better solution"
         if esc_nlive:
             multimodal[0] = True
         blocked = False
-        if multimodal[0] and esc_nsteps:
+        ub = RS.get("unblock")
+        if multimodal[0] and esc_nsteps and ub:
+            at_cap = nlive >= max_nlive
+            strong = bool(check and sC is not None and sC["M"] >= gate and np.isfinite(d) and np.isfinite(sig)
+                          and abs(d) > FR["route_dlnz_sig"] * sig)
+            if (ub == "cap" and at_cap) or (ub == "cap_dlnz" and at_cap and strong) or (ub == "dlnz" and strong):
+                multimodal_ok = True
+                why += " (multimodal, nsteps allowed: " + ("n_live at its cap" if at_cap else "arms differ") + ")"
+            else:
+                multimodal_ok = False
+        else:
+            multimodal_ok = False
+        if multimodal[0] and esc_nsteps and not multimodal_ok:
             # once runs disagree like runs that miss modes, the comparison of the arms only shows which arm got the
             # lucky runs (Kepler artefact fits escalated nsteps to 1024 on that): no nsteps escalation any more.
             # Rule 3's excess scatter goes to n_live instead (Round 23: n_live lowers the chain-length bias about like
@@ -1284,7 +1425,7 @@ def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=
     # handler deleted by the wrong thread"; seen 10-14 in test_sampling after plot_run())
     import gc
     gc.collect()
-    with ThreadPoolExecutor(max_workers=threads) as ex:
+    with (pool if pool is not None else ThreadPoolExecutor(max_workers=threads)) as ex:
         def top_up():
             nonlocal nxt
             while len(inflight) < threads:
@@ -1453,7 +1594,9 @@ def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=
     mixm = np.mean([r["mix"] for r in R], axis=0)
     return dict(mix=mixm, logz=lzm, logzerr=hist[-1]["logz_err"], logzerr_boot=lzb, samples_u=samples, ess=ess,
                 runs=R, n_failed=len(bad), n_aborted=n_aborted[0], n_obsolete=n_obsolete[0], n_eval=n_eval[0],
-                n_eval_pre=n_eval[1], t_eval=t_eval[0], t_compile=t_compile, ordered=bool(ordered), runs_check=arms.get(max(1, N // 2), []) if check else [], history=hist, passed=passed,
+                n_eval_pre=n_eval[1], t_eval=t_eval[0], t_compile=t_compile, backend=backend,
+                gpu_stats=dict(pool.stats, slots=pool.R if pool.n else None, k=pool.k if pool.n else None) if pool else None,
+                ordered=bool(ordered), runs_check=arms.get(max(1, N // 2), []) if check else [], history=hist, passed=passed,
                 wall=time.perf_counter() - t0, ncall=hist[-1]["ncall"], nlive=nlive, nlive0=nlive0,
                 n_nlive_escalations=nlesc, multimodal=multimodal[0], nsteps=N, nsteps0=nsteps,
                 n_escalations=nesc, dlnz_check=hist[-1].get("dlnz"), dlnz_check_err=hist[-1].get("dlnz_err"),

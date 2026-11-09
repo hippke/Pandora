@@ -6,6 +6,7 @@
     python run_tests.py --unit       # unit tests only (unit_tests.py)
     python run_tests.py NAME [NAME]  # selected light-curve cases only
     python run_tests.py --sampling   # in addition: the fit API / sampler tests (test_sampling.py, ~3-5 min)
+    python run_tests.py --gpu        # in addition: the GPU backend (tests/gpu/, skipped without an NVIDIA GPU)
     pytest run_tests.py unit_tests.py   # same checks under pytest (if installed)
 
 Each light-curve case is checked for (1) unchanged case definition, (2)
@@ -108,4 +109,10 @@ if __name__ == "__main__":
         print("\nfit API / sampler tests (test_sampling.py):", flush=True)
         failures += subprocess.call([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                                                   "test_sampling.py")]) != 0
+    if "--gpu" in sys.argv:
+        import subprocess
+        for f in ("test_model.py", "test_sampler.py"):
+            print(f"\nGPU backend tests (gpu/{f}):", flush=True)
+            failures += subprocess.call([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                                      "gpu", f)]) != 0
     sys.exit(1 if failures else 0)

@@ -2264,7 +2264,9 @@ def test_interior_interpolant():
                                     _int_coeffs_exact, _int_table_build, _occult_int_batch,
                                     _occult_int_select, _occult_hybrid_samples, _occult_point,
                                     _use_interior)
-    assert np.max(np.abs(INT_TAB - _int_table_build())) <= 1e-13, "interior_table.csv is stale"
+    # the rebuild under fastmath rounds differently per CPU (FMA contraction, vector width): 1.6e-12 on a Zen 4
+    # (AVX-512) vs < 1e-13 on AVX2; the coefficients enter the flux at ~1e-12, far below the 1e-8 accuracy of the table
+    assert np.max(np.abs(INT_TAB - _int_table_build())) <= 5e-12, "interior_table.csv is stale"
     for k in np.concatenate([[INT_TAB_KMIN, INT_TAB_KMAX], np.exp(np.random.default_rng(7).uniform(
             np.log(INT_TAB_KMIN), np.log(INT_TAB_KMAX), 200))]):
         for u1, u2 in ((0.4, 0.26), (0.0, 1.0), (2.0, -1.0)):
@@ -2508,7 +2510,9 @@ def test_limb_interpolant():
     zl = np.linspace(0.9, 1.1, 64) ** 2
     fresh(zl, 64, 0.1, _limb_coeffs(0.1, 0.4, 0.26), np.empty(64))
     ir = "".join(fresh.inspect_llvm().values())
-    assert "vector.body" in ir and "llvm.sqrt.v4f64" in ir, "_occult_limb_batch not vectorised"
+    # any vector width: AVX2 gives v4f64, AVX-512 (e.g. Zen 4) v8f64
+    import re
+    assert "vector.body" in ir and re.search(r"llvm\.sqrt\.v\d+f64", ir), "_occult_limb_batch not vectorised"
 
 
 def test_occult_blocks_match_single_samples():

@@ -36,6 +36,13 @@ class Likelihood(object):
 
     The 20 model parameters are taken as float64 (any value that float()
     accepts); the call goes straight to the compiled model (P8).
+
+    gp: None (default: white noise, as above) or a pandoramoon.gp.GP with fixed
+    hyperparameters (amp, tau, err_scale): simultaneous GP detrending, the
+    light curve is fitted as model + GP + white noise instead of being
+    detrended first (pandoramoon/gp.py). The data must then be the raw
+    (normalised, not detrended) flux, in ascending time. The same GP is used
+    by the planet-only model of NestedSampler.
     """
 
     def __init__(
@@ -50,6 +57,7 @@ class Likelihood(object):
         numerical_grid=None,
         cache=None,
         eclipse_method="analytic",
+        gp=None,
     ):
         # numerical_grid and eclipse_method="pixelmap" (the legacy pixel raster for limb eclipses) were removed in
         # 2026-10; the names stay so that positional calls keep working
@@ -103,12 +111,38 @@ class Likelihood(object):
             self.time_sorted,
         )
         self._loglike = _compiled_loglike(self._tail)
+        self.gp = gp
+        self.gp_tables = None
+        if gp is not None:
+            from pandoramoon.gp import GP, gp_setup, output_times
+            if not isinstance(gp, GP):
+                raise TypeError("gp must be a pandoramoon.gp.GP (or None)")
+            if not self.time_sorted:
+                raise ValueError("Likelihood(gp=...): the time must be ascending")
+            t_out = output_times(self.time, supersampling_factor)
+            if len(t_out) != n_out:
+                raise ValueError("Likelihood(gp=...): cadence times do not match the data")
+            yerr_v = np.ascontiguousarray(np.where(valid, yerr, 1.0))
+            y1 = np.ascontiguousarray(np.where(valid, data - 1.0, 0.0))
+            self.time_out = t_out
+            self.gp_tables = gp_setup(t_out, y1, (gp.err_scale * yerr_v) ** 2, np.ascontiguousarray(valid),
+                                      yerr_v, gp.amp, gp.tau)
+            self._gp_tail = (
+                self.epoch_distance, self.supersampling_factor, self.occult_small_threshold,
+                self.hill_sphere_threshold, self.time) + tuple(self.gp_tables) + (self.cache, self.time_sorted)
 
     def __call__(
         self, u1, u2, R_star, per_bary, a_bary, r_planet, b_bary, w_bary, ecc_bary,
         t0_bary, t0_bary_offset, M_planet, r_moon, per_moon, tau_moon, Omega_moon,
         i_moon, ecc_moon, w_moon, M_moon
     ):
+        if self.gp is not None:
+            from pandoramoon.gp import pandora_loglike_gp
+            return pandora_loglike_gp(
+                float(u1), float(u2), float(R_star), float(per_bary), float(a_bary), float(r_planet),
+                float(b_bary), float(w_bary), float(ecc_bary), float(t0_bary), float(t0_bary_offset),
+                float(M_planet), float(r_moon), float(per_moon), float(tau_moon), float(Omega_moon),
+                float(i_moon), float(ecc_moon), float(w_moon), float(M_moon), *self._gp_tail)
         return self._loglike(
             u1, u2, R_star, per_bary, a_bary, r_planet, b_bary, w_bary, ecc_bary,
             t0_bary, t0_bary_offset, M_planet, r_moon, per_moon, tau_moon,
