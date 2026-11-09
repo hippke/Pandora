@@ -921,6 +921,10 @@ _RULE_FLAGS = ("gap_bias", "scatter_runs32", "scatter_clip", "route_dlnz", "ks_h
 RULE_SETS = {
     "r23": dict.fromkeys(_RULE_FLAGS, False),
     "r25": dict.fromkeys(_RULE_FLAGS, True),
+    # r26 (the default since 2026-11-09, GPU_LOG Round 9.1): r25, and an nsteps request passes the multimodal block
+    # once n_live is at max_nlive (where r25 stops "stalled"): SBC draw 4, 16 / 66 runs in flight: 36 / 27 % passed ->
+    # 93 / 79 %; HH22 (the negative control): the same decisions
+    "r26": dict(dict.fromkeys(_RULE_FLAGS, True), unblock="cap"),
     # the steps of GPU_LOG Round 8 (to reproduce its simulations): v8 = r25
     "v1": dict(dict.fromkeys(_RULE_FLAGS, False), gap_bias=True),
     "v4": dict(dict.fromkeys(_RULE_FLAGS, False), gap_bias=True, scatter_runs32=True),
@@ -1107,8 +1111,9 @@ def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=
     (tutorial: corr(lnZ, iterations) = -0.95; the shortest half of 64 runs +0.41 nats above all 64, GPU_LOG Round 6):
     runs that start together (the GPU's slots) and a stop that discards the runs in flight bias lnZ upwards.
 
-    rules: the rule set (RULE_SETS): "r25" (default; None = $PANDORA_FIT_RULES or "r25") or "r23" (the rules before
-    2026-11-09). r25 differs from r23 in: rule 4 only for a gap whose runs below it can bias the merged lnZ by more
+    rules: the rule set (RULE_SETS): "r26" (default; None = $PANDORA_FIT_RULES or "r26"), "r25" or "r23" (the rules
+    before 2026-11-09). r26 = r25, and once n_live is at max_nlive an nsteps request is no longer blocked by the
+    multimodal flag (r25 stops "stalled" there; GPU_LOG.md Round 9.1). r25 differs from r23 in: rule 4 only for a gap whose runs below it can bias the merged lnZ by more
     than gap_bias x lz_tol (see _better_solution_gap); rule 3 from scatter_runs_r25 runs on, on the sd without low
     outlier runs (> scatter_clip_mad MAD-sd below the median, at most gap_bias x lz_tol of the runs), and routed to
     nsteps also when the arms' mean lnZ differ by more than route_dlnz_sig sigma; rule 2's KS escalation only on the
@@ -1155,7 +1160,7 @@ def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=
 
     if rules is None:                            # the default; experiments can set it by the environment
         import os
-        rules = os.environ.get("PANDORA_FIT_RULES", "r25")
+        rules = os.environ.get("PANDORA_FIT_RULES", "r26")
     if rules not in RULE_SETS:
         raise ValueError(f"rules must be one of {sorted(RULE_SETS)}")
     RS = RULE_SETS[rules]
