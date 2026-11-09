@@ -708,6 +708,12 @@ extern "C" __global__ void limb_fix(const float* __restrict__ DT, const int* __r
 // (Composing the chi^2 as quadratic forms of the entering state instead lost ~0.03 nats in FP32.) Plus the
 // closed-form tail after the last window cadence. OUT = -(c0 + sum) / 2 - ld for the calls that kernel 1 left at 0
 // (valid, no queue overflow).
+// GP_D: the number of states (pandoramoon.gp's general model, GP(terms=..., baseline=..., gap=...)); 2 (default):
+// the code below with the packed float4 tables; > 2: the same two passes with d x d maps (after this one).
+#ifndef GP_D
+#define GP_D 2
+#endif
+#if GP_D == 2
 struct GAff { float M00, M01, M10, M11, b0, b1; };
 
 __device__ __forceinline__ GAff gaff_shfl_up(const GAff& a, int off) {
@@ -826,6 +832,195 @@ extern "C" __global__ void gp_pass(int n, int nc, int ne, const int2* __restrict
         OUT[call] = -0.5 * (c0 + v + tail) - ld;
     }
 }
+#else
+// d = GP_D > 2 states (GP_NSHO SHO blocks of 2, then GP_BASE baseline states: 0, 1 offset, 2 offset + slope), in the
+// blocks' own coordinates: F is block-diagonal and depends only on the time step, the observed sum is h . m (the
+// first state of each SHO block plus the offset), so a cadence costs O(d):
+//   GSTEP[c]: the step index (-1: a segment start, the state restarts at 0), GT[u * GNT ...]: per step the SHO
+//   blocks' 2 x 2 transitions (row-major) and dt (linear baseline); GKIE[c * (D + 2) ...]: the gains, 1 / sqrt(S), e;
+//   GW[c * (NW + D) ...]: the tail (W's upper triangle row-major, then v); GM[j * D * D ...]: the product of the maps
+//   A_c = (I - K_c h') F_c over the cadences j C ... (j + 1) C - 1 of a fixed grid (FP64 on the host): pass 1 composes
+//   these instead of one matrix per cadence, and runs only the vector part per cadence.
+#define GD GP_D
+#define GNW (GD * (GD + 1) / 2)
+#define GNT (4 * GP_NSHO + 1)
+struct GAffD { float M[GD][GD]; float b[GD]; };
+
+// B <- (A then B)
+__device__ __forceinline__ void gaffd_then(const GAffD& A, GAffD& B) {
+    GAffD r;
+#pragma unroll
+    for (int i = 0; i < GD; ++i) {
+#pragma unroll
+        for (int j = 0; j < GD; ++j) {
+            float s = 0.f;
+#pragma unroll
+            for (int k = 0; k < GD; ++k) s += B.M[i][k] * A.M[k][j];
+            r.M[i][j] = s;
+        }
+        float s = B.b[i];
+#pragma unroll
+        for (int k = 0; k < GD; ++k) s += B.M[i][k] * A.b[k];
+        r.b[i] = s;
+    }
+    B = r;
+}
+
+// one cadence of the D-filter: m <- F_c m (or 0 at a segment start), inn = d - h . m, m += K inn; returns inn
+__device__ __forceinline__ float gpd_step(float* m, int c, bool pred, float d, const int* __restrict__ GSTEP,
+                                          const float* __restrict__ GT, const float* __restrict__ kie) {
+    if (pred) {
+        int u = __ldg(&GSTEP[c]);
+        if (u < 0) {
+#pragma unroll
+            for (int i = 0; i < GD; ++i) m[i] = 0.f;
+        } else {
+            const float* T = GT + (size_t)u * GNT;
+#pragma unroll
+            for (int j = 0; j < GP_NSHO; ++j) {
+                float x = m[2 * j], y = m[2 * j + 1];
+                m[2 * j] = __ldg(&T[4 * j]) * x + __ldg(&T[4 * j + 1]) * y;
+                m[2 * j + 1] = __ldg(&T[4 * j + 2]) * x + __ldg(&T[4 * j + 3]) * y;
+            }
+#if GP_BASE == 2
+            m[2 * GP_NSHO] += __ldg(&T[4 * GP_NSHO]) * m[2 * GP_NSHO + 1];
+#endif
+        }
+    }
+    float o = 0.f;
+#pragma unroll
+    for (int j = 0; j < GP_NSHO; ++j) o += m[2 * j];
+#if GP_BASE > 0
+    o += m[2 * GP_NSHO];
+#endif
+    float inn = d - o;
+#pragma unroll
+    for (int i = 0; i < GD; ++i) m[i] += __ldg(&kie[i]) * inn;
+    return inn;
+}
+
+extern "C" __global__ void gp_pass(int n, int nc, int ne, const int2* __restrict__ GLH_all,
+                                   const float* __restrict__ GDB_all, const int* __restrict__ GSTEP,
+                                   const float* __restrict__ GT, const float* __restrict__ GKIE,
+                                   const float* __restrict__ GW, const float* __restrict__ GM, int C,
+                                   double c0, double ld, double* __restrict__ OUT, const int* __restrict__ ACT) {
+    int call = (blockIdx.x * blockDim.x + threadIdx.x) >> 5, lane = threadIdx.x & 31;
+    if (call >= n) return;
+    if (ACT && !ACT[call]) return;
+    if (!(OUT[call] == 0.0)) return;
+    const int2* LH = GLH_all + (size_t)call * ne;
+    const float* DB = GDB_all + (size_t)call * nc;
+    int first = 0x7fffffff, last = -1;
+    for (int e = lane; e < ne; e += 32) {
+        int2 r = LH[e];
+        if (r.y > r.x) { first = min(first, r.x); last = max(last, r.y - 1); }
+    }
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) {
+        first = min(first, __shfl_xor_sync(0xffffffffu, first, o));
+        last = max(last, __shfl_xor_sync(0xffffffffu, last, o));
+    }
+    if (last < 0) {
+        if (lane == 0) OUT[call] = -0.5 * c0 - ld;
+        return;
+    }
+    // lanes take consecutive grid chunks j0 ... j1 (cpl each); lane 0 starts at first (its map's matrix part is
+    // never used: the span starts from m = 0), the lane holding last ends there (its matrix part is not used either)
+    int j0 = first / C, j1 = last / C, nch = j1 - j0 + 1, cpl = (nch + 31) >> 5;
+    int js = j0 + lane * cpl, je = min(js + cpl, j1 + 1);
+    int a = (js <= j1) ? max(first, js * C) : last + 1;
+    int b = (js <= j1) ? min(last + 1, je * C) : last + 1;
+    int L = (j1 - j0) / cpl;
+    int e0 = 0;
+    int2 r0 = LH[0];
+    while (a >= r0.y && e0 + 1 < ne) r0 = LH[++e0];
+    GAffD g;
+#pragma unroll
+    for (int i = 0; i < GD; ++i) {
+#pragma unroll
+        for (int j = 0; j < GD; ++j) g.M[i][j] = (i == j) ? 1.f : 0.f;
+        g.b[i] = 0.f;
+    }
+    // pass 1, matrix part: the precomputed chunk maps
+    for (int j = js; j < je; ++j) {
+        GAffD h;
+        const float* Mj = GM + (size_t)j * (GD * GD);
+#pragma unroll
+        for (int i = 0; i < GD; ++i) {
+#pragma unroll
+            for (int k = 0; k < GD; ++k) h.M[i][k] = __ldg(&Mj[i * GD + k]);
+            h.b[i] = 0.f;
+        }
+        gaffd_then(g, h);
+        g = h;
+    }
+    // pass 1, vector part: the chunk run from m = 0
+    {
+        int e = e0;
+        int2 r = r0;
+        for (int c = a; c < b; ++c) {
+            while (c >= r.y && e + 1 < ne) r = LH[++e];
+            float d = (c >= r.x && c < r.y) ? DB[c] : 0.f;
+            gpd_step(g.b, c, c > first, d, GSTEP, GT, GKIE + (size_t)c * (GD + 2));
+        }
+    }
+#pragma unroll
+    for (int o = 1; o < 32; o <<= 1) {
+        GAffD h;
+#pragma unroll
+        for (int i = 0; i < GD; ++i) {
+#pragma unroll
+            for (int j = 0; j < GD; ++j) h.M[i][j] = __shfl_up_sync(0xffffffffu, g.M[i][j], o);
+            h.b[i] = __shfl_up_sync(0xffffffffu, g.b[i], o);
+        }
+        if (lane >= o) gaffd_then(h, g);
+    }
+    float m[GD];
+#pragma unroll
+    for (int i = 0; i < GD; ++i) {
+        m[i] = __shfl_up_sync(0xffffffffu, g.b[i], 1);
+        if (lane == 0) m[i] = 0.f;
+    }
+    // pass 2: the chi^2 terms from the entering state
+    float acc = 0.f, comp = 0.f;
+    {
+        int e = e0;
+        int2 r = r0;
+        for (int c = a; c < b; ++c) {
+            while (c >= r.y && e + 1 < ne) r = LH[++e];
+            float d = (c >= r.x && c < r.y) ? DB[c] : 0.f;
+            const float* kie = GKIE + (size_t)c * (GD + 2);
+            float inn = gpd_step(m, c, c > first, d, GSTEP, GT, kie);
+            float dw = inn * __ldg(&kie[GD]);
+            float t = dw * (dw + 2.f * __ldg(&kie[GD + 1]));
+            float s2 = acc + t;
+            comp += (fabsf(acc) >= fabsf(t)) ? (acc - s2) + t : (t - s2) + acc;
+            acc = s2;
+        }
+    }
+    double v = (double)acc + (double)comp;
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) v += __shfl_down_sync(0xffffffffu, v, o);
+    float fs[GD];
+#pragma unroll
+    for (int i = 0; i < GD; ++i) fs[i] = __shfl_sync(0xffffffffu, m[i], L);
+    if (lane == 0) {
+        const float* w = GW + (size_t)last * (GNW + GD);
+        double tail = 0.0;
+        int q = 0;
+#pragma unroll
+        for (int i = 0; i < GD; ++i) {
+            tail += 2.0 * (double)__ldg(&w[GNW + i]) * fs[i];
+#pragma unroll
+            for (int j = i; j < GD; ++j) {
+                tail += (i == j ? 1.0 : 2.0) * (double)__ldg(&w[q]) * fs[i] * fs[j];
+                ++q;
+            }
+        }
+        OUT[call] = -0.5 * (c0 + v + tail) - ld;
+    }
+}
+#endif
 #endif
 
 // ------------------------------------------------------------------------------------------- prior transform

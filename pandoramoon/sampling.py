@@ -1204,6 +1204,19 @@ class NestedSampler:
                 warn.append(f"{100 * (jk['top_share'] or 1):.0f} % of the fit improvement of the moon model comes from "
                             f"one transit (epoch {jk['top_epoch']}; without it Delta chi2 = {jk['dchi2_without_top']:.1f} "
                             f"< {jk['jack_min']:.0f}): likely an artefact of that transit, not a moon")
+        try:
+            from pandoramoon.search import residual_scatter
+            self.results = res
+            chi, npts = residual_scatter(self.likelihood, self.parameters())
+            res["residual_chi2"] = chi
+            if npts > 20 and chi > 1.0 + max(0.25, 6.0 * math.sqrt(2.0 / npts)):
+                warn.append(f"the residuals of the best fit are {math.sqrt(chi):.2f} x the error bars (chi2 / N = "
+                            f"{chi:.2f}, N = {npts}): the noise model does not fit (red noise or trends left by the "
+                            "detrending, or underestimated errors). Evidences are then unreliable and fits slow; "
+                            "inflate the errors (prepare_lightcurve's beta) or fit the trend (Likelihood(gp=...))")
+        except Exception as ex:                     # a diagnostic only
+            res["residual_chi2"] = None
+            warn.append(f"residual check failed: {ex}")
         for name, r in (("planet + moon" if self.model == "moon" else "planet", res), ("planet only", res.get("planet"))):
             if r is None:
                 continue

@@ -96,6 +96,8 @@ like = pandora.Likelihood(time, flux, flux_err, epoch_distance=P, gp=gp)   # raw
 results = pandora.NestedSampler(like, priors, device="gpu").run()          # or device="cpu"
 ```
 
+Options for real light curves (all on the CPU and the GPU): `GP.fit(..., kernel="sho_q" | "sho2" | "rotation")` for an SHO term with a fitted quality factor, two terms (slow trend + granulation), or a rotation kernel (celerite2's `RotationTerm` + granulation; needs data covering several rotations); `baseline="offset"` or `"linear"` with `gap=0.5` for a marginalised baseline per segment (Kepler quarters, or data windows around each transit), with the GP independent across gaps; `clip=True` flags flares (also inside the transit windows) and outliers, returned as `gp.outliers` (set those fluxes to NaN). Terms can also be combined by hand: `GP(terms=[SHO(amp, tau, Q), Rotation(amp, period)], baseline="offset", gap=0.5)`.
+
 ### Fitting: evidence and posterior with the built-in nested sampler
 `NestedSampler` fits a `Likelihood` with priors, compares planet+moon with planet-only (Bayes factor) and checks its own convergence. Parameters are Pandora's (same names and units); give a prior or a fixed number for each. The limb darkening is set as `q1, q2` (Kipping) or `u1, u2` (e.g. `Normal` priors from stellar models, with `ld_correlation`). `w_bary`, `ecc_bary`, `ecc_moon` and `w_moon` default to 0.
 
