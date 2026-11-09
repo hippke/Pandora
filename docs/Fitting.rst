@@ -44,8 +44,12 @@ Quick start
    samples = results["samples"]                      # equal-weight posterior, columns results["paramnames"]
 
 Complete worked examples are the tutorials ``examples/tutorial_detection.ipynb`` and
-``examples/tutorial_characterisation.ipynb``. On data like the tutorials' (3 transits, 30-min cadence, 500 ppm) the
+``examples/tutorial_characterisation.ipynb``; ``tutorial_characterisation_gpu.ipynb`` runs the same fit on a GPU and
+``tutorial_characterisation_GP.ipynb`` fits a light curve with stellar variability (simultaneous GP). On data like the tutorials' (3 transits, 30-min cadence, 500 ppm) the
 planet+moon fit takes a few minutes on 16 cores (accuracy medium) and the planet-only fit seconds.
+
+With an NVIDIA GPU, ``NestedSampler(..., device="gpu")`` is 3–8× faster (`GPU`_). For light curves with stellar
+variability, see `Correlated noise: simultaneous GP detrending`_.
 
 Typical run times for Kepler long-cadence targets (3–40 transits, ~400–1700 points in the fit windows; accuracy
 medium; AMD Ryzen 9 7950X, 16 cores):
@@ -133,7 +137,7 @@ A search has two stages: a fast **detection** test for every light curve, and th
 Interface
 ---------
 
-.. class:: NestedSampler(likelihood, priors, model="moon", compare_planet=True, moon_phase="auto", ld_correlation=0.0, log_dir=None, resume="subfolder", threads=None, seed=1, verbose=True, supersampling="auto", planet_evidence="is")
+.. class:: NestedSampler(likelihood, priors, model="moon", compare_planet=True, moon_phase="auto", ld_correlation=0.0, log_dir=None, resume="subfolder", threads=None, seed=1, verbose=True, supersampling="auto", planet_evidence="is", device="cpu", gpu_options=None, gp_profile=False)
 
    :likelihood: A :class:`pandoramoon.Likelihood`. It holds the data, the errors and Pandora's model
       settings (``supersampling_factor``, ``hill_sphere_threshold``, ``occult_small_threshold``,
@@ -182,6 +186,13 @@ Interface
       parameters. An integer: that many sub-exposures. ``None``: use the likelihood as given. The likelihood the fit
       actually uses is ``sampler.likelihood`` (e.g. ``sampler.likelihood(**sampler.parameters())``
       gives the ``logl`` of ``results["maxlikelihood"]``).
+   :device: ``"cpu"`` (default) or ``"gpu"``: the planet+moon fit on an NVIDIA GPU (see `GPU`_); the
+      planet-only fit stays on the CPU and runs at the same time.
+   :gpu_options: *(dict)* For ``device="gpu"``: options of the GPU run pool (``pandoramoon.gpu.sampler.GPURunPool``,
+      e.g. ``slots``). The defaults are tuned; leave it ``None``.
+   :gp_profile: *(bool)* With a correlated-noise model (``Likelihood(gp=...)``, see `Correlated noise: simultaneous
+      GP detrending`_): after ``run()``, also compute the conservative Bayes factor with each model at its own GP
+      hyperparameters (:meth:`gp_profile`). Default ``False``; recommended before claiming a moon found with a GP.
 
    .. method:: run(accuracy=None, max_weighted_samples=None, progress=None, **kwargs)
 
@@ -234,6 +245,14 @@ Interface
 
       Corner plot of the posterior (needs the ``corner`` package). With a *log_dir*, it is saved as
       ``plots/corner.pdf``. ``model="planet"`` plots the planet-only fit.
+
+   .. method:: gp_profile(max_iter=4, tol=0.02, n_is=20000)
+
+      For a finished planet+moon fit with ``Likelihood(gp=...)``: the Bayes factor with the GP's hyperparameters
+      refitted for each model (`Fixed hyperparameters and the Bayes factor`_). Called by ``run()`` when
+      ``gp_profile=True``; can also be called afterwards. Stores and returns ``results["gp_profile"]`` and sets
+      ``results["dlogz_conservative"]``. ``max_iter`` and ``tol`` (in ln of the hyperparameters) limit the
+      planet-only refits, ``n_is`` is the number of posterior samples used for the importance sampling.
 
 
 Priors
@@ -320,7 +339,12 @@ For ``model="moon"`` with the planet comparison, the dictionary also has:
 :jackknife: The epoch jackknife (see `Searching for moons: detection`_): the fit improvement of the moon
    model per transit and whether the improvement without the strongest transit reaches 18 (``passed``).
 :warnings: Notes on the fit (supersampling used, checks not passed, one transit dominating, runs that
-   disagree). ``print_results()`` prints them.
+   disagree, residuals larger than the error bars, a GP Bayes factor that drops when the hyperparameters are
+   refitted). ``print_results()`` prints them.
+:residual_chi2: χ²/N of the best fit's residuals with the likelihood's errors (with a GP: of the whitened
+   residuals). About 1 ± √(2/N) when the noise model fits. Above 1 + max(0.25, 6√(2/N)) the fit warns: red noise or
+   trends left by the detrending, or underestimated errors. Evidences are then unreliable and fits slow. On the GP
+   test case below: 23.7 for a biweight-detrended light curve with white errors, 1.00 with the GP.
 
 :planet: The planet-only results (the same keys).
 :dlogz, dlogzerr: The Bayes factor ln Z(moon) − ln Z(planet) and its error.
@@ -329,6 +353,11 @@ For ``model="moon"`` with the planet comparison, the dictionary also has:
    `Interpreting the Bayes factor`_ before quoting the category.
 :logz_excluded_correction: The (tiny) exact correction for the short-period part of the moon-period
    prior (see `Moon orbit: phase-at-transit coordinates`_).
+:gp_profile, dlogz_conservative: With ``gp_profile=True`` (a GP likelihood): ``gp_profile`` holds ``dlogz`` and
+   ``dlogzerr`` with each model at its own GP hyperparameters, ``dlogz_fixed`` (the fit's value), the lnZ and GP of
+   each model (``moon``, ``planet``), all evaluated ``candidates``, the ``planet_iterations``, the importance
+   sampling's effective sample size ``ess_moon``, and ``seconds``. ``dlogz_conservative`` is the smaller of the two
+   Bayes factors: quote it.
 
 A rough guide to Bayes factors (Kass & Raftery 1995): ΔlnZ > 5 is strong evidence for a moon.
 Calibration on injected white-noise light curves: light curves without a moon gave ΔlnZ between about −6
@@ -358,6 +387,171 @@ Runs that were in flight at an interruption are redone with their original seeds
 usually gives the same result as an uninterrupted one. It is not guaranteed: which check arm a new run
 joins depends on the timing.
 If the data, priors or settings differ from the stored fit, an error is raised.
+
+
+GPU
+---
+
+``NestedSampler(..., device="gpu")`` runs the planet+moon fit on an NVIDIA GPU (``pip install pandoramoon[gpu]``:
+numba-cuda and NVIDIA's CUDA Python packages; any recent NVIDIA GPU). The likelihood is a CUDA port of Pandora's
+model in single precision (FP32), validated against the double-precision CPU model; the sampler is the same
+``nss`` algorithm with the same checks, its runs advanced in parallel on the GPU. The planet-only fit stays on the
+CPU and runs at the same time. Results and files are the same as for ``device="cpu"``.
+
+**Scope.** Circular planet orbits (``ecc_bary = 0``), moon eccentricity ≤ 0.9, ``occult_small_threshold = 0``,
+no occultation ``cache``, and ``r_planet``, ``r_moon`` within 0.0005–0.25 (the GPU's occultation tables). Outside
+it the GPU likelihood raises an error: use ``device="cpu"``. The simultaneous GP (below) is supported.
+
+**Speed** (Ryzen 9 7950X, all 32 threads, vs a consumer RTX 5060):
+
+- the characterisation tutorial's fit: 36 s instead of 164 s (whole notebook 45 vs 171 s);
+- a 12-case test suite: 29 % of the CPU's wall time; simulation-based calibration (96 fits): 6960 s vs 55 405 s;
+- the likelihood on real Kepler light curves: 6–10× the whole CPU (Kepler-747 b: table in `Speed`_ below).
+
+**Accuracy.** FP32 changes a likelihood value by 10⁻³–10⁻² nats at posterior points. Evidences agree with the CPU
+within their errors: in the simulation-based calibration ln Z(GPU) − ln Z(CPU) was +0.013 on average with a scatter
+of 0.14 (the errors ~0.1 each), and the GPU posteriors are calibrated. On the tutorial's light curve the GPU fits
+are 0.1–0.15 nats below long reference chains (within ``lz_tol``; under study).
+
+
+Correlated noise: simultaneous GP detrending
+--------------------------------------------
+
+The default noise model is white Gaussian noise with the given errors, so the light curve has to be detrended first
+(``prepare_lightcurve``). Detrending with masked transits leaves trends inside the transit windows, where the moon's
+dips are, and the moon model fits them. ``Likelihood(..., gp=GP(...))`` instead fits the **raw** (normalised) light
+curve as the transit model plus a Gaussian process (GP) plus white noise:
+
+   data = model + g + white,   g ~ GP(0, k),   white ~ N(0, (err_scale · flux_err)²)
+
+(**experimental**). Both the planet+moon and the planet-only model use the same GP, so the Bayes factor compares
+them under the same noise model. The likelihood is exact: the kernels are linear state-space models (celerite's
+SHO terms; Foreman-Mackey et al. 2017), computed by a Kalman filter on the CPU and the GPU. The GP's
+hyperparameters are **fixed** during the fit; estimate them first with ``GP.fit``. ::
+
+   from pandoramoon.gp import GP
+   # mask: True for the points to leave out of GP.fit, i.e. each transit plus the moon's reach (e.g. +-0.5 d)
+   gp = GP.fit(time, flux, flux_err, mask=mask)          # milliseconds
+   like = pandora.Likelihood(time, flux, flux_err, epoch_distance=P, gp=gp)   # raw flux, not detrended
+   sampler = pandora.NestedSampler(like, priors, gp_profile=True)               # or also device="gpu"
+   results = sampler.run()
+   print(results["dlogz"], results["dlogz_conservative"])
+
+The tutorial ``examples/tutorial_characterisation_GP.ipynb`` works through a test case: the Pandora paper's
+planet and moon (4 transits, 10-min cadence, 100 ppm) on a spotted, granulating star (rotation period 6 d, 1500 +
+600 ppm; granulation 200 ppm at 0.15 d). Bayes factors and the fitted moon period (true 1.28 d):
+
+==========================================  =========================  ===========================
+data and noise model                        light curve with the moon  the same star, no moon
+==========================================  =========================  ===========================
+biweight-detrended, white errors σ          ΔlnZ +7985, P_moon 24 d    **+7903** (false moon)
+biweight-detrended, errors σ × β (β 7.4)    +119, P_moon 33 d          **+115** (false moon)
+raw flux, simultaneous GP                   +1495, **P_moon 1.280 d**  **−5.00**
+==========================================  =========================  ===========================
+
+.. class:: GP(amp=None, tau=None, err_scale=1.0, Q=None, terms=None, baseline=None, gap=None, baseline_sd=(0.01, 0.01))
+
+   The noise model (``pandoramoon.gp``).
+
+   :amp, tau, Q: One SHO term: rms ``amp`` (relative flux, e.g. 3e-4), time scale ``tau`` = 1/ω₀ [d], quality
+      factor ``Q`` (default 1/√2: smooth, not periodic; the correlation falls to ½ at ~1.4 τ).
+   :err_scale: Factor on ``flux_err``: the white noise is ``err_scale × flux_err``.
+   :terms: Instead of ``amp, tau``: a list of terms, ``SHO(amp, tau, Q=1/√2)`` and
+      ``Rotation(amp, period, Q0=1, dQ=1, f=0.5)`` (celerite2's ``RotationTerm``: two SHO terms at the rotation
+      period and its half). At most 8 states in total (2 per SHO term, 4 per ``Rotation``, plus the baseline).
+   :baseline: ``None``, ``"offset"`` (a constant per segment) or ``"linear"`` (offset and slope per segment),
+      marginalised analytically with a wide Gaussian prior (standard deviations ``baseline_sd``; the Bayes factor does
+      not depend on it while it is wide).
+   :gap: ``None`` (one segment) or a time [d]: a gap longer than this starts a new, independent segment (the GP and
+      the baseline restart). Use it for Kepler quarters or for data windows around each transit.
+
+   .. method:: fit(time, flux, yerr, mask=None, err_scale=None, amp_bounds=None, tau_bounds=None, bin_width=10/1440, n_starts=3, kernel="sho", baseline=None, gap=None, baseline_sd=(0.01, 0.01), period=None, clip=None)
+      :classmethod:
+
+      Maximum-likelihood hyperparameters of the GP alone (model flux 1), with ``mask`` (``True`` = left out)
+      covering the transits and the moon's reach. ``kernel``: ``"sho"`` (default), ``"sho_q"`` (Q fitted too),
+      ``"sho2"`` (two SHO terms, e.g. a slow trend plus granulation), ``"rotation"`` (``Rotation`` + an SHO term;
+      needs data over several rotations; the start periods come from a Lomb–Scargle periodogram, or ``period``).
+      ``baseline``, ``gap``, ``baseline_sd`` as in ``GP`` (held fixed). ``err_scale``: a number to hold it, ``None``
+      to fit it. Data are binned to ``bin_width`` for the fit when the cadence is shorter than half of it.
+      ``clip=True`` (or ``(upper, lower)`` in σ, default (4, 5)): flag flares (upward, also inside the transit windows)
+      and outliers (downward, outside the mask) with ``flag_outliers`` and refit without them; the flagged points are
+      returned as ``gp.outliers`` (a boolean array): set those fluxes to NaN before building the ``Likelihood``.
+      Returns a ``GP``.
+
+   .. method:: flag_outliers(time, flux, yerr, mask=None, upper=4, lower=5, inside=None, max_iter=100, sep=3)
+
+      Points more than ``upper`` σ above or ``lower`` σ below the GP's leave-one-out prediction (exact, from the
+      Kalman smoother), iterated, the peak of each flare first (within ``sep`` cadences).
+
+   .. method:: predict(time, residual, yerr, mask=None)
+
+      The GP's conditional mean and standard deviation given the residuals (data − model), e.g. to plot the
+      stellar variability under a fit.
+
+   .. method:: sample(time, rng=None)
+
+      A random draw of the GP (the correlated part), e.g. to simulate stellar variability for injection tests.
+
+**Choosing the data.** The GP learns the variability from the data around the transits, so give it some: e.g.
+±3 d around each transit, whole quarters, or the whole light curve. The cost per likelihood call depends on the data
+inside the moon model's reach only, not on how much surrounds it (`Speed`_). With data windows around each transit,
+use ``gap`` (e.g. 0.5 d) so that the windows are independent segments, and ``baseline="offset"`` for their
+normalisation. The short fit windows of ``prepare_lightcurve`` (±1.5 T14) are too short to pin down slow variability
+(on Kepler-747 b: τ 2.4 d from them, 1.0–1.3 d from ±3 d or all data).
+
+**The noise check.** ``results["residual_chi2"]`` (χ²/N of the whitened residuals) is ~1 when the GP describes the
+noise. Fitting a raw light curve with white noise, or a detrended one with errors that are too small, warns.
+
+Fixed hyperparameters and the Bayes factor
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The fit holds the GP's hyperparameters h fixed for both models, usually at values estimated outside the transits.
+A planet-only model given a free GP could explain part of a real moon's dips as stellar variability (a shorter,
+stronger GP), so **the fixed-h Bayes factor overstates the evidence for a real moon**. On the test case above
+(5 noise realisations): with the moon, ΔlnZ 1406–1595 with h fixed, but 347–376 with ΔlnZ marginalised over h (each
+model's evidence averaged over a flat prior in ln h); the planet-only model prefers τ ≈ 0.08 d instead of 0.5 d.
+Still decisive, but ~4× smaller in nats. Without a moon both agree to 0.1 nats: fixing h causes no false moons
+there.
+
+``NestedSampler(..., gp_profile=True)`` (or ``sampler.gp_profile()`` after a fit) computes the cheap correction:
+each model at its own h. The moon model's h is refitted on its best fit's residuals and its ln Z there obtained by
+importance sampling of its posterior samples; the planet-only model's h is refitted on its residuals, followed by a
+planet-only fit at that h, repeated until h changes by less than 2 % (1–4 fits, on the CPU). Each model keeps the
+highest ln Z it reached. Cost: seconds to a minute. On the test case: 346.3 with the moon (fixed h: 1406.6;
+marginalised 347.4) and −4.89 without (fixed −4.70, marginalised −4.73). ``results["dlogz_conservative"]`` is the
+smaller of the two values, and the fit warns when the profile is much lower than the fixed-h value. **Quote
+``dlogz_conservative`` for a moon found with a GP.**
+
+Speed
+~~~~~
+
+Likelihood throughput on Kepler-747 b (the same posterior points; fit windows ±1.5 T14, 1647 points, 5×
+supersampling; Ryzen 9 7950X with all 32 threads, RTX 5060 at 8192 calls):
+
+=========  =====================================  ======================================
+           detrended first, white noise           simultaneous GP, raw flux
+=========  =====================================  ======================================
+CPU        0.66 M calls/s                         0.51 M calls/s (±3 d data: 0.52)
+GPU        5.81 M calls/s                         3.23 M calls/s (±3 d data: 3.73)
+GPU / CPU  8.9×                                   6.4×
+=========  =====================================  ======================================
+
+The GP's filter runs only over the cadences in the moon model's reach and the gaps between them shorter than its
+decay time (``gp_horizon``); longer gaps cost one closed-form term. So the cost stays the same with ±3 d of data
+around each transit or the whole light curve (59 044 points: 3.76 M calls/s on the GPU). A fit also needs fewer
+calls when the noise model fits: on the tutorial's test case the GP fits took 2.3–2.5 × 10⁹ likelihood calls, the
+fits of the biweight-detrended light curve, whose leftover trends the moon model has to fit, 2.0–28 × 10⁹.
+
+**Validation.** The likelihood equals dense Gaussian algebra (Cholesky of the full covariance) to ≤ 2 × 10⁻⁷ nats
+for every kernel, baseline and segment option, with supersampling and missing points; the GPU equals the CPU to
+~5 × 10⁻⁴ nats (median) near the posterior. ``GP.fit`` recovers the hyperparameters of simulated light curves.
+Tests: ``tests/test_gp.py`` (``--gpu`` for the GPU).
+
+**Limitations.** The kernels are stationary within a segment; strongly non-stationary variability (e.g. a flare
+decay or a sudden jump) needs ``gap``/``baseline`` or masking. The hyperparameters are fixed (``gp_profile`` covers
+their main effect on the Bayes factor; the posterior of the planet and moon parameters is at the fixed h). The epoch
+jackknife and the residual check use the whitened residuals.
 
 
 Background
@@ -581,6 +775,10 @@ curves, use them with these caveats:
   Signs of this: a moon at the edge of its prior (Pandora warns), a fit improvement that does not survive the
   epoch jackknife, a result that changes with the detrending, timing or duration changes of the planet's transits.
 
+- **With a GP, quote the conservative Bayes factor.** With the GP's hyperparameters fixed, ΔlnZ overstates a real
+  moon (by ~4× on our test case); ``gp_profile=True`` gives ``dlogz_conservative`` (`Fixed hyperparameters and the
+  Bayes factor`_).
+
 - **On real data the relevant yardstick is empirical**: how often the same star produces such a ΔlnZ without a moon.
   Inject planet-only transits at other phases of the same light curve (after removing the real transits), and moon
   signals, process them exactly like the real data (detrending, priors, ``detect`` or the full fit), and compare.
@@ -607,9 +805,10 @@ Limitations
 - **Evidence systematic of the sampler:** against long-chain reference fits, the default chain length (64
   steps) biases ln Z by −0.02 … +0.13 nats on our test cases (high side). Treat ±0.13 as a systematic when
   comparing evidences at the 0.1-nat level; it does not matter for detection (threshold 3).
-- The noise model is white Gaussian noise with the given errors. There is no jitter term and no
-  correlated noise. ``prepare_lightcurve`` inflates the errors by the red-noise factor β, which corrects
-  the Bayes factor to first order; artefacts confined to one transit are caught by the epoch jackknife.
+- The default noise model is white Gaussian noise with the given errors (no jitter term). ``prepare_lightcurve``
+  inflates the errors by the red-noise factor β, which corrects the Bayes factor to first order; artefacts confined
+  to one transit are caught by the epoch jackknife. For correlated noise and stellar variability, fit the raw light
+  curve with a GP (`Correlated noise: simultaneous GP detrending`_; experimental).
 - **Long-cadence data need supersampling.** ``NestedSampler(supersampling="auto")`` (default) uses 5
   sub-exposures per data point when the cadence is ≥ 10 min (exposure = cadence); pass an already
   supersampled ``Likelihood`` (``supersampling_factor`` and a supersampled time grid, as for ``pandora()``)
@@ -645,3 +844,5 @@ References
 - Talts et al. 2018, arXiv:1804.06788 (simulation-based calibration)
 - Buchner 2021, JOSS 6, 3001 (UltraNest; result conventions)
 - Hippke & Heller 2022, A&A, arXiv:2205.09410 (Pandora)
+- Foreman-Mackey, Agol, Ambikasaran & Angus 2017, AJ 154, 220 (celerite: SHO kernels, state-space GPs)
+- Pont, Zucker & Queloz 2006, MNRAS 373, 231 (red noise, β)
