@@ -697,36 +697,102 @@ extern "C" __global__ void limb_fix(const float* __restrict__ DT, const int* __r
 }
 
 #ifdef GP
-// Kernel 3 (GP build): the simultaneous GP's chi^2 (pandoramoon/gp.py gp_quad), one thread per call: the D-filter
+// Kernel 3 (GP build): the simultaneous GP's chi^2 (pandoramoon/gp.py gp_quad), one warp per call. The D-filter runs
 // over the call's cadences from its first to its last window cadence (the deficit from GDB inside the epoch windows
-// GLH, 0 elsewhere) with the gains, innovation scales and whitened data of gp_setup (FP32 tables), Neumaier-summed,
-// plus the closed-form tail after the last window cadence. OUT = -(c0 + sum) / 2 - ld for the calls that kernel 1
-// left at 0 (valid, no queue overflow).
+// GLH, 0 elsewhere), split into 32 consecutive chunks, one per lane, in two passes:
+//   1. each lane: the affine map of its chunk on the filtered state, m -> M m + b (small, contracting numbers); an
+//      ordered prefix scan of the maps (shuffles) gives each lane the state entering its chunk (the span starts
+//      from m = 0);
+//   2. each lane re-runs its chunk from that state and sums its chi^2 terms dw (dw + 2 e) directly (as the
+//      sequential filter; Neumaier per lane, the lanes' sums in FP64).
+// (Composing the chi^2 as quadratic forms of the entering state instead lost ~0.03 nats in FP32.) Plus the
+// closed-form tail after the last window cadence. OUT = -(c0 + sum) / 2 - ld for the calls that kernel 1 left at 0
+// (valid, no queue overflow).
+struct GAff { float M00, M01, M10, M11, b0, b1; };
+
+__device__ __forceinline__ GAff gaff_shfl_up(const GAff& a, int off) {
+    GAff r;
+    r.M00 = __shfl_up_sync(0xffffffffu, a.M00, off); r.M01 = __shfl_up_sync(0xffffffffu, a.M01, off);
+    r.M10 = __shfl_up_sync(0xffffffffu, a.M10, off); r.M11 = __shfl_up_sync(0xffffffffu, a.M11, off);
+    r.b0 = __shfl_up_sync(0xffffffffu, a.b0, off); r.b1 = __shfl_up_sync(0xffffffffu, a.b1, off);
+    return r;
+}
+
+// A then B
+__device__ __forceinline__ GAff gaff_then(const GAff& A, const GAff& B) {
+    GAff r;
+    r.M00 = B.M00 * A.M00 + B.M01 * A.M10; r.M01 = B.M00 * A.M01 + B.M01 * A.M11;
+    r.M10 = B.M10 * A.M00 + B.M11 * A.M10; r.M11 = B.M10 * A.M01 + B.M11 * A.M11;
+    r.b0 = B.M00 * A.b0 + B.M01 * A.b1 + B.b0; r.b1 = B.M10 * A.b0 + B.M11 * A.b1 + B.b1;
+    return r;
+}
+
 extern "C" __global__ void gp_pass(int n, int nc, int ne, const int2* __restrict__ GLH_all,
                                    const float* __restrict__ GDB_all, const float4* __restrict__ GF,
-                                   const float2* __restrict__ GK, const float* __restrict__ GIRS,
-                                   const float* __restrict__ GE, const float4* __restrict__ GW,
+                                   const float4* __restrict__ GKE, const float4* __restrict__ GW,
                                    double c0, double ld, double* __restrict__ OUT, const int* __restrict__ ACT) {
-    int call = blockIdx.x * blockDim.x + threadIdx.x;
+    int call = (blockIdx.x * blockDim.x + threadIdx.x) >> 5, lane = threadIdx.x & 31;
     if (call >= n) return;
     if (ACT && !ACT[call]) return;
     if (!(OUT[call] == 0.0)) return;               // invalid (-inf) or queue overflow (NaN): as kernel 1 set it
     const int2* LH = GLH_all + (size_t)call * ne;
     const float* DB = GDB_all + (size_t)call * nc;
-    int first = -1, last = -1;
-    for (int e = 0; e < ne; ++e) {
+    int first = 0x7fffffff, last = -1;
+    for (int e = lane; e < ne; e += 32) {
         int2 r = LH[e];
-        if (r.y > r.x) {
-            if (first < 0) first = r.x;
-            last = r.y - 1;
+        if (r.y > r.x) { first = min(first, r.x); last = max(last, r.y - 1); }
+    }
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) {
+        first = min(first, __shfl_xor_sync(0xffffffffu, first, o));
+        last = max(last, __shfl_xor_sync(0xffffffffu, last, o));
+    }
+    if (last < 0) {
+        if (lane == 0) OUT[call] = -0.5 * c0 - ld;
+        return;
+    }
+    int span = last - first + 1, ch = (span + 31) >> 5;
+    int a = first + lane * ch, b = min(a + ch, last + 1);
+    int e0 = 0;                                    // the epoch window at or after a
+    int2 r0 = LH[0];
+    while (a >= r0.y && e0 + 1 < ne) r0 = LH[++e0];
+    // pass 1: the chunk's affine map
+    GAff g;
+    g.M00 = 1.f; g.M01 = 0.f; g.M10 = 0.f; g.M11 = 1.f; g.b0 = g.b1 = 0.f;
+    {
+        int e = e0;
+        int2 r = r0;
+        for (int c = a; c < b; ++c) {
+            float p00 = g.M00, p01 = g.M01, p10 = g.M10, p11 = g.M11, pb0 = g.b0, pb1 = g.b1;
+            if (c > first) {
+                float4 f = __ldg(&GF[c]);
+                p00 = f.x * g.M00 + f.y * g.M10; p01 = f.x * g.M01 + f.y * g.M11;
+                p10 = f.z * g.M00 + f.w * g.M10; p11 = f.z * g.M01 + f.w * g.M11;
+                pb0 = f.x * g.b0 + f.y * g.b1; pb1 = f.z * g.b0 + f.w * g.b1;
+            }
+            while (c >= r.y && e + 1 < ne) r = LH[++e];
+            float d = (c >= r.x && c < r.y) ? DB[c] : 0.f;
+            float4 kg = __ldg(&GKE[c]);            // (K0, K1, 1 / sqrt(S), e)
+            float bb = d - pb0;
+            g.M00 = p00 - kg.x * p00; g.M01 = p01 - kg.x * p01;
+            g.M10 = p10 - kg.y * p00; g.M11 = p11 - kg.y * p01;
+            g.b0 = pb0 + kg.x * bb; g.b1 = pb1 + kg.y * bb;
         }
     }
-    double out = -0.5 * c0 - ld;
-    if (first >= 0) {
-        float m0 = 0.f, m1 = 0.f, acc = 0.f, comp = 0.f;
-        int e = 0;
-        int2 r = LH[0];
-        for (int c = first; c <= last; ++c) {
+    // inclusive prefix scan (lane i: lanes 0 ... i), then the state entering lane i's chunk = b of lanes 0 ... i-1
+#pragma unroll
+    for (int o = 1; o < 32; o <<= 1) {
+        GAff h = gaff_shfl_up(g, o);
+        if (lane >= o) g = gaff_then(h, g);
+    }
+    float m0 = __shfl_up_sync(0xffffffffu, g.b0, 1), m1 = __shfl_up_sync(0xffffffffu, g.b1, 1);
+    if (lane == 0) { m0 = 0.f; m1 = 0.f; }
+    // pass 2: the chi^2 terms from the entering state
+    float acc = 0.f, comp = 0.f;
+    {
+        int e = e0;
+        int2 r = r0;
+        for (int c = a; c < b; ++c) {
             if (c > first) {
                 float4 f = __ldg(&GF[c]);
                 float n0 = f.x * m0 + f.y * m1;
@@ -736,22 +802,29 @@ extern "C" __global__ void gp_pass(int n, int nc, int ne, const int2* __restrict
             while (c >= r.y && e + 1 < ne) r = LH[++e];
             float d = (c >= r.x && c < r.y) ? DB[c] : 0.f;
             float inn = d - m0;
-            float dw = inn * __ldg(&GIRS[c]);
-            float t = dw * (dw + 2.f * __ldg(&GE[c]));
+            float4 kg = __ldg(&GKE[c]);
+            float dw = inn * kg.z;
+            float t = dw * (dw + 2.f * kg.w);
             float s2 = acc + t;
             comp += (fabsf(acc) >= fabsf(t)) ? (acc - s2) + t : (t - s2) + acc;
             acc = s2;
-            float2 k = __ldg(&GK[c]);
-            m0 += k.x * inn;
-            m1 += k.y * inn;
+            m0 += kg.x * inn;
+            m1 += kg.y * inn;
         }
-        float4 w = __ldg(&GW[2 * last]);           // (W00, W01, W11, 0), (v0, v1, 0, 0)
-        float4 vv = __ldg(&GW[2 * last + 1]);
-        double tail = (double)w.x * m0 * m0 + 2.0 * (double)w.y * m0 * m1 + (double)w.z * m1 * m1
-                      + 2.0 * ((double)vv.x * m0 + (double)vv.y * m1);
-        out = -0.5 * (c0 + (double)acc + (double)comp + tail) - ld;
     }
-    OUT[call] = out;
+    double v = (double)acc + (double)comp;
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) v += __shfl_down_sync(0xffffffffu, v, o);
+    // the filtered state after the last cadence: held by the lane whose chunk ends at last
+    int L = (span - 1) / ch;
+    float f0 = __shfl_sync(0xffffffffu, m0, L), f1 = __shfl_sync(0xffffffffu, m1, L);
+    if (lane == 0) {
+        float4 wq = __ldg(&GW[2 * last]);          // (W00, W01, W11, 0), (v0, v1, 0, 0)
+        float4 vv = __ldg(&GW[2 * last + 1]);
+        double tail = (double)wq.x * f0 * f0 + 2.0 * (double)wq.y * f0 * f1 + (double)wq.z * f1 * f1
+                      + 2.0 * ((double)vv.x * f0 + (double)vv.y * f1);
+        OUT[call] = -0.5 * (c0 + v + tail) - ld;
+    }
 }
 #endif
 

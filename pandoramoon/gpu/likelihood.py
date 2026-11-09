@@ -90,10 +90,9 @@ class GPULikelihood:
             gw = np.zeros((nc, 2, 4), np.float32)
             gw[:, 0, :3] = W
             gw[:, 1, :2] = v
+            ke = np.stack([K[:, 0], K[:, 1], irs, e], axis=1).astype(np.float32)   # one float4 load per cadence
             self.d.update(GF=cuda.to_device(np.ascontiguousarray(F, dtype=np.float32)),
-                          GK=cuda.to_device(np.ascontiguousarray(K, dtype=np.float32)),
-                          GIRS=cuda.to_device(np.ascontiguousarray(irs, dtype=np.float32)),
-                          GE=cuda.to_device(np.ascontiguousarray(e, dtype=np.float32)),
+                          GKE=cuda.to_device(np.ascontiguousarray(ke)),
                           GW=cuda.to_device(gw.reshape(nc * 2, 4)))
             self.gp_c0, self.gp_ld = float(c0), float(ld)
             self._gdb = self._glh = None
@@ -171,9 +170,9 @@ class GPULikelihood:
                      _cuda.ptr(self._co), _cuda.ptr(self.dDONE),
                      *((gpa[0], np.int32(self.nc)) if self.gp else ()))
         if self.gp:
-            _cuda.launch(self.kernel_gp, (n + 127) // 128, 128, np.int32(n), np.int32(self.nc), np.int32(len(self.te)),
-                         gpa[1], gpa[0], _cuda.ptr(d["GF"]), _cuda.ptr(d["GK"]), _cuda.ptr(d["GIRS"]),
-                         _cuda.ptr(d["GE"]), _cuda.ptr(d["GW"]), np.float64(self.gp_c0), np.float64(self.gp_ld),
+            _cuda.launch(self.kernel_gp, (n + 3) // 4, 128, np.int32(n), np.int32(self.nc), np.int32(len(self.te)),
+                         gpa[1], gpa[0], _cuda.ptr(d["GF"]), _cuda.ptr(d["GKE"]), _cuda.ptr(d["GW"]),
+                         np.float64(self.gp_c0), np.float64(self.gp_ld),
                          _cuda.ptr(dOUT), _cuda.ptr(dACT))
 
     def __call__(self, theta, check=True, return_nlimb=False):
