@@ -65,6 +65,17 @@ class GPULikelihood:
             EHI=cuda.to_device(ehi), ELO=cuda.to_device(elo),
             IV=cuda.to_device(np.asarray(like.inv_var, dtype=np.float32)),
             LN=cuda.to_device((1.0 - np.asarray(like.data, dtype=np.float64)).astype(np.float32)))   # E = 1 - data
+        # per-epoch windows (model.cu main_loop, GPU_LOG Round 8): the cadence range of each epoch (time ascending:
+        # contiguous) and the FP64 prefix sums of the FP32 flat terms IV E^2 (the chi^2 of a cadence with d = 0)
+        ec = np.searchsorted(ep, np.arange(len(ue) + 1)).astype(np.int32)
+        iv32 = np.asarray(like.inv_var, dtype=np.float32)
+        e32 = (1.0 - np.asarray(like.data, dtype=np.float64)).astype(np.float32)
+        r32 = np.float32(0) - e32
+        flat = ((iv32 * r32) * r32).astype(np.float64)            # as the kernel: (IV r) r in FP32
+        pf = np.concatenate([[0.0], np.cumsum(flat)])
+        self.windows = not any(x[0] == "NO_WINDOW" for x in extra)
+        self.pft = float(pf[-1]) if self.windows else 0.0
+        self.d.update(EC=cuda.to_device(ec), PF=cuda.to_device(pf))
         # eccentric=False: compiled without the eccentric-moon loop (about 5 % faster); ecc_moon must then be 0
         self.eccentric = bool(eccentric)
         self.mod = _cuda.module(ss, warps, minb, tuple(extra) + (() if self.eccentric else (("NO_ECC", "1"),)))
@@ -121,7 +132,8 @@ class GPULikelihood:
                          np.float32(L.hill_sphere_threshold), np.float32(self.hspan),
                          _cuda.ptr(self.LT), _cuda.ptr(self.IT), _cuda.ptr(dOUT), _cuda.ptr(dNLIMB),
                          _cuda.ptr(self._q), _cuda.ptr(self.dQN), qcap, _cuda.ptr(self._pc), _cuda.ptr(self._co),
-                         _cuda.ptr(dACT))
+                         _cuda.ptr(dACT), np.int32(len(self.te)), _cuda.ptr(d["EC"]), _cuda.ptr(d["PF"]),
+                         np.float64(self.pft))
         if not fix:
             return
         _cuda.launch(self.kernel_fix, self.fix_blocks, 128,

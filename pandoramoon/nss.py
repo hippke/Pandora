@@ -915,19 +915,38 @@ FIT_RULES = dict(_settings()["fit_rules"])          # settings.cfg [fit_rules] (
 _FIT = _settings()["fit"]
 
 
-def _better_solution_gap(runs, q):
-    """rule 4: the largest gap in the sorted lnZ of the runs exceeds max(gap_quoted x q, gap_nats) and the runs above
-    it reach a higher maximum likelihood (median maxL > gap_maxl higher)"""
+def _gap_split(runs, q):
+    """the largest gap in the sorted lnZ of the runs: (qualifies, gap, number of runs below it). It qualifies if it
+    exceeds max(gap_quoted x q, gap_nats) and the runs above it reach a higher maximum likelihood (median maxL >
+    gap_maxl higher)"""
     FR = FIT_RULES
     o = np.argsort([r["logz"] for r in runs])
     zs = np.array([runs[i]["logz"] for i in o])
     ms = np.array([runs[i]["maxL"] for i in o])
     if len(zs) < 4:
-        return False
+        return False, 0.0, 0
     jg = int(np.argmax(np.diff(zs)))
     gap = float(zs[jg + 1] - zs[jg])
     higher = float(np.median(ms[jg + 1:]) - np.median(ms[:jg + 1])) > FR["gap_maxl"]
-    return bool(higher and gap > max(FR["gap_quoted"] * q, FR["gap_nats"]))
+    return bool(higher and gap > max(FR["gap_quoted"] * q, FR["gap_nats"])), gap, jg + 1
+
+
+def _better_solution_gap(runs, q, lz_tol=None, rules="r23"):
+    """rule 4: the largest gap in the sorted lnZ of the runs exceeds max(gap_quoted x q, gap_nats) and the runs above
+    it reach a higher maximum likelihood (median maxL > gap_maxl higher).
+    rules "v1" ... (item 7, opt-in): only if the merged lnZ can be biased by more than gap_bias x lz_tol: the m runs
+    below the gap missed the mass above it (a fraction 1 - exp(-gap) of Z), and the merge of the M runs as one run
+    (merge_weights) gives that mass only the (M - m) / M of the live points that found it, a bias of about
+    ln(1 - (m / M) (1 - exp(-gap))). A few runs below a majority that found the solution are harmless (HH22 on the
+    GPU: 1 of 38); a minority above the gap (the runs that found a better solution) is not."""
+    ok, gap, m = _gap_split(runs, q)
+    if not ok or rules == "r23":
+        return ok
+    frac = (m / len(runs)) * (1.0 - math.exp(-gap))
+    return bool(-math.log1p(-min(frac, 1.0 - 1e-12)) > _GAP_BIAS * lz_tol)
+
+
+_GAP_BIAS = 0.5          # rules v1+: rule 4 needs an estimated merge bias > 0.5 lz_tol (item 7; not in settings.cfg yet)
 
 
 def failed_runs(rs, dl_max=None, dz_min=None):
@@ -1012,7 +1031,7 @@ def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=
         max_runs=None, ks_tol=0.05, lz_tol=0.1, seed=1, dirs="pairs", frac_remain=0.01, verbose=True,
         post_map=None, kpair=4, check=True, max_nsteps=None, recluster=0.25, data=None,
         accuracy=None, resume=None, callback=None, max_nlive=None, progress=False, progress_label="fit",
-        backend="cpu", gpu=None, ordered=True):
+        backend="cpu", gpu=None, ordered=True, rules=None):
     """Nested sampling with built-in convergence checks.
 
     Independent serial nss runs (n_live = nlive each) run in parallel threads and are merged as one run
@@ -1066,7 +1085,16 @@ def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=
     submitted before it to that arm has finished, so the runs used are a complete prefix in submission order. Without
     it the runs in use are the first to FINISH, and a run's length is strongly anticorrelated with its lnZ
     (tutorial: corr(lnZ, iterations) = -0.95; the shortest half of 64 runs +0.41 nats above all 64, GPU_LOG Round 6):
-    runs that start together (the GPU's slots) and a stop that discards the runs in flight bias lnZ upwards."""
+    runs that start together (the GPU's slots) and a stop that discards the runs in flight bias lnZ upwards.
+
+    rules: "r23" (default; None: $PANDORA_FIT_RULES or "r23"): the four rules above, or an experimental variant (GPU_PLAN.md item 7, opt-in, under
+    validation): "v1" rule 4 only for a gap whose runs below it can bias the merged lnZ by > 0.5 lz_tol (see
+    _better_solution_gap); "v2" v1 + rule 3 on the MAD-sd of the runs (robust to single outlying runs); "v3" v1 +
+    rule 3 on the sd without the runs below a non-qualifying (harmless) rule-4 gap; "v4" v1 + rule 3 only from 32
+    runs on (the Round 21 calibration; before: max(16, 2 min_runs)); "v5" v4 + rule 3 routes to nsteps also when the
+    arms' mean lnZ differ by > 2 sigma; "v6" v1 + v3 + v4 + v5; "v7" v1 + v4 + v5 + rule 3 on the sd without the
+    low outlier runs (> 5 MAD-sd below the median) when they are at most 0.5 lz_tol of the runs; "v8" v7 + rule 2's
+    KS escalation only on the permutation null's maximum (not its median)."""
     from concurrent.futures import ThreadPoolExecutor
     import sys
     # progress status (Round 23): a status line every few seconds while the runs execute (as UltraNest's). The compiled
@@ -1106,6 +1134,11 @@ def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=
         else:
             print(s, flush=True)
 
+    if rules is None:                            # experiments: the default can be set by the environment
+        import os
+        rules = os.environ.get("PANDORA_FIT_RULES", "r23")
+    if rules not in ("r23", "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8"):
+        raise ValueError('rules must be "r23" or one of "v1" ... "v5"')
     if accuracy is not None:
         a = ACCURACY[accuracy]
         nlive, lz_tol, ks_tol = a["nlive"], a["lz_tol"], a["ks_tol"]
@@ -1203,6 +1236,7 @@ def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=
         gate = max(FR["runs_gate"], min_runs // 2)            # runs per arm before an arm statistic is trusted
         q_run = float(np.mean([r["logzerr"] for r in Rg]))
         h.update(scatter_ratio=float(sR["sd"] / q_run) if q_run > 0 and np.isfinite(sR["sd"]) else np.nan,
+                 scatter_ratio_mad=float(sR["mad_sd"] / q_run) if q_run > 0 and np.isfinite(sR["mad_sd"]) else np.nan,
                  nlive=nlive)
         ok_bias, esc_nsteps, esc_nlive, why = True, False, False, ""
         sC = None
@@ -1229,17 +1263,40 @@ def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=
             own_ok_ = bool(sR["M"] >= min_runs and ks <= ks_tol and sR["err"] <= lz_tol)
             ks_esc = need and (ksa * ksa - hi * hi > ks_tol * ks_tol or
                                (own_ok_ and ksa * ksa - med * med > ks_tol * ks_tol
-                                and min(sR["M"], sC["M"]) >= FR["ks_runs"] * min_runs))
+                                and min(sR["M"], sC["M"]) >= FR["ks_runs"] * min_runs and rules != "v8"))
             dl_esc = (abs(d) - k_sig * sig > FR["bias_esc"] * lz_tol or
                       (own_ok_ and sig <= FR["precise_sigma"] * lz_tol and abs(d) - sig > FR["precise_esc"] * lz_tol))
             if enough and (dl_esc or ks_esc):
                 esc_nsteps, why = True, ("dlnZ" if dl_esc else "KS") + " between the arms"
         # rule 3 (excess scatter): the per-run lnZ scatter far above the quoted sqrt(H/n) -> the runs do not sample
         # alike. If the check arm (N / 2) scatters clearly more, longer chains help (nsteps); else more live points
-        if (sR["M"] >= max(FR["scatter_runs_min"], FR["scatter_runs_x"] * min_runs) and q_run > 0
-                and sR["sd"] > FR["scatter_ratio"] * q_run):
+        sd3 = sR["sd"]
+        if rules == "v2":
+            sd3 = sR["mad_sd"]
+        elif rules in ("v7", "v8"):
+            # low outlier runs (> 5 MAD-sd below the median; e.g. HH22 on the GPU: 1 run in 128 at -7 nats) can
+            # bias the merged lnZ by at most ~ -m / M: up to 0.5 lz_tol of the runs they are left out of the scatter
+            zz = np.array([r["logz"] for r in Rg])
+            if len(zz) > 4 and np.isfinite(sR["mad_sd"]):
+                low = zz < np.median(zz) - 5.0 * sR["mad_sd"]
+                m_low = int(low.sum())
+                if 0 < m_low <= _GAP_BIAS * lz_tol * len(zz) and len(zz) - m_low > 2:
+                    sd3 = float(np.std(zz[~low], ddof=1))
+        elif rules in ("v3", "v6"):
+            ok_g, gap_g, m_g = _gap_split(Rg, q_run)
+            if ok_g and m_g < len(Rg) / 2 and not _better_solution_gap(Rg, q_run, lz_tol, rules):
+                zz = np.sort([r["logz"] for r in Rg])[m_g:]
+                sd3 = float(np.std(zz, ddof=1)) if len(zz) > 2 else sd3
+        runs3 = max(FR["scatter_runs_min"], FR["scatter_runs_x"] * min_runs)
+        if rules in ("v4", "v5", "v6", "v7", "v8"):
+            runs3 = max(runs3, 32)                   # the Round 21 calibration: 0 % false triggers at 32 runs
+        if (sR["M"] >= runs3 and q_run > 0 and sd3 > FR["scatter_ratio"] * q_run):
             falls = bool(sC is not None and sC["M"] >= gate and np.isfinite(sC.get("sd", np.nan))
                          and sC["sd"] >= FR["scatter_falls"] * sR["sd"])
+            if rules in ("v5", "v6", "v7", "v8") and sC is not None and sC["M"] >= gate and np.isfinite(d) and np.isfinite(sig):
+                # the arms' mean lnZ differ (> 2 sigma): chain-length dependence, whatever the sd ratio says (the
+                # ratio of two sd estimates has an uncertainty ~0.26 at 30 runs per arm against the threshold 1.25)
+                falls = falls or abs(d) > 2.0 * sig
             if falls:
                 esc_nsteps, why = True, "excess scatter that falls with nsteps"
             else:
@@ -1247,7 +1304,7 @@ def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=
         # rule 4 (runs that found a better solution): a gap in the sorted lnZ of all runs of an arm with the runs
         # above it reaching a higher maximum likelihood (far-too-short chains scatter too, but reach the same maxL)
         for runs_ in ((R, C) if check else (R,)):
-            if len(runs_) >= gate and _better_solution_gap(runs_, q_run):
+            if len(runs_) >= gate and _better_solution_gap(runs_, q_run, lz_tol, rules):
                 esc_nlive, why = True, "some runs found a better solution"
         if esc_nlive:
             multimodal[0] = True

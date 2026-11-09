@@ -242,6 +242,7 @@ struct CallP {
     float B, t0s, dt0, dP, ph0, ipm_hi, ipm_lo, w2pi, cO, sO, sc, cc, bb, ap, am, kp, km, u1, u2, reach, rs2, inv_f0;
     float e, ax, bx, ay, by, sq;     // eccentric moon (e > 0): direction (ax X + bx Y, ay X + by Y), X = cos E - e,
                                      // Y = sq sin E (ellipse._orbit_axes)
+    float offp2, offm2;              // off-star bounds of the cadence centre (circular moon; cadence_deficit)
     bool moon_on, ecl_on;
 };
 static_assert(sizeof(CallP) <= 128, "CallP must fit the 32-float slot of limb_fix");
@@ -290,6 +291,15 @@ __device__ __forceinline__ float cadence_deficit(int c, const CallP& P, const Da
     ph -= floorf(ph + 0.5f);
     float sA, cA;
     sincospif(ph + ph, &sA, &cA);
+#ifndef NO_CULL
+    if (!ECC) {                  // both bodies off the star for the whole cadence: deficit 0 (GPU_LOG Round 8; P10)
+        float xc = P.B * (base + dtc) - P.t0s;
+        float vxc = P.cO * cA - P.sc * sA, vyc = P.sO * cA + P.cc * sA;
+        float xpc = xc - vxc * P.ap, ypc = P.bb - vyc * P.ap;
+        float xmc = xc + vxc * P.am, ymc = P.bb + vyc * P.am;
+        if (fmaf(xpc, xpc, ypc * ypc) >= P.offp2 && (!P.moon_on || fmaf(xmc, xmc, ymc * ymc) >= P.offm2)) return 0.f;
+    }
+#endif
 #pragma unroll
     for (int j = 0; j < SS; ++j) {
         float dt = __ldg(&D.DT[c * SS + j]);
@@ -420,6 +430,14 @@ __device__ __forceinline__ bool call_setup(const double* __restrict__ th, const 
     P.w2pi = TWO_PI_F * P.ipm_hi;
     P.reach = 1.f + fmaxf(kp, km) + (P.am + P.ap) * (1.f + em) + P.B * S.hspan;
     P.rs2 = (kp + km) * (kp + km);
+    {   // a body whose distance from the star's centre at the cadence's centre sample exceeds 1 + k by more than it can
+        // move within the cadence (|dt - dt_c| <= hspan: B hspan along x, a w2pi hspan along the orbit, as |dv| <= |d
+        // angle|) is off the star at all SS samples (deficit exactly 0); the margin 1e-4 relative + 1e-5 covers FP32
+        float mp = P.B * S.hspan + P.ap * P.w2pi * S.hspan, mm = P.B * S.hspan + P.am * P.w2pi * S.hspan;
+        float bp = (1.f + kp + mp) * 1.0001f + 1e-5f, bm = (1.f + fmaxf(km, 1e-4f) + mm) * 1.0001f + 1e-5f;   // the moon body uses max(km, 1e-4)
+        P.offp2 = bp * bp;
+        P.offm2 = bm * bm;
+    }
     P.inv_f0 = 1.f / (PI_F * (1.f - u1 * (1.f / 3.f) - u2 * (1.f / 6.f)));
     float om = 1.f / (1.f - u1 * (1.f / 3.f) - u2 * (1.f / 6.f));
     float w0 = (1.f - u1 - 2.f * u2) * om, w1 = (u1 + 2.f * u2) * om, w2 = u2 * om;
@@ -439,29 +457,107 @@ __device__ __forceinline__ bool call_setup(const double* __restrict__ th, const 
 // kernel 1's cadence loop (lane l: cadences l, l + 32, ...): chi^2 of the cadences without a limb eclipse
 // (Neumaier-compensated), the others queued for limb_fix
 template <bool ECC>
-__device__ __forceinline__ void main_loop(int lane, int nc, int call, bool valid, const CallP& P, const Data& D,
-                                          const Body& Pb, const Body& Mb, const float* __restrict__ IV,
-                                          const float* __restrict__ E, int2* __restrict__ Q, int* __restrict__ QN,
-                                          int qcap, float& chi, float& comp, int& nlimb, bool& overflow) {
-    for (int c = lane; c < nc; c += 32) {
-        bool defer = false;
-        float d = cadence_deficit<false, ECC>(c, P, D, Pb, Mb, defer);
-        if (defer) {
-            ++nlimb;
-            if (valid) {
-                int iq = atomicAdd(QN, 1);
-                if (iq < qcap) Q[iq] = make_int2(call, c);
-                else overflow = true;
-            }
-            continue;
+__device__ __forceinline__ void one_cadence(int c, int call, bool valid, const CallP& P, const Data& D,
+                                            const Body& Pb, const Body& Mb, const float* __restrict__ IV,
+                                            const float* __restrict__ E, int2* __restrict__ Q, int* __restrict__ QN,
+                                            int qcap, float& chi, float& comp, int& nlimb, bool& overflow) {
+    bool defer = false;
+    float d = cadence_deficit<false, ECC>(c, P, D, Pb, Mb, defer);
+    if (defer) {
+        ++nlimb;
+        if (valid) {
+            int iq = atomicAdd(QN, 1);
+            if (iq < qcap) Q[iq] = make_int2(call, c);
+            else overflow = true;
         }
-        float r = d - __ldg(&E[c]);
-        float t = __ldg(&IV[c]) * r * r;
-        float s2 = chi + t;                                   // Neumaier summation
-        comp += (fabsf(chi) >= fabsf(t)) ? (chi - s2) + t : (t - s2) + chi;
-        chi = s2;
+        return;
+    }
+    float r = d - __ldg(&E[c]);
+    float t = __ldg(&IV[c]) * r * r;
+    float s2 = chi + t;                                   // Neumaier summation
+    comp += (fabsf(chi) >= fabsf(t)) ? (chi - s2) + t : (t - s2) + chi;
+    chi = s2;
+}
+
+#ifdef NO_WINDOW
+// all cadences (before Round 8: the out-of-reach ones return d = 0 at the reach test of cadence_deficit)
+template <bool ECC>
+__device__ __forceinline__ void main_loop(int lane, int nc, int ne, const int* __restrict__ EC,
+                                          const double* __restrict__ PF, int call, bool valid, const CallP& P,
+                                          const Data& D, const Body& Pb, const Body& Mb, const float* __restrict__ IV,
+                                          const float* __restrict__ E, int2* __restrict__ Q, int* __restrict__ QN,
+                                          int qcap, float& chi, float& comp, double& flat_in, int& nlimb,
+                                          bool& overflow) {
+    for (int c = lane; c < nc; c += 32)
+        one_cadence<ECC>(c, call, valid, P, D, Pb, Mb, IV, E, Q, QN, qcap, chi, comp, nlimb, overflow);
+}
+#else
+// the in-reach window of each epoch (GPU_LOG Round 8): the reach test of cadence_deficit, f(c) = |B (base_e + dtc_c)
+// - t0s| < reach, is monotone in the cadence's centre time dtc_c, also in FP32 (every operation rounds monotonically),
+// so per epoch the cadences that pass it are one index range [lo, hi): found by binary search (lane = epoch, 32 epochs
+// at a time) and processed by the whole warp (lane j: the j-th cadence of the concatenated ranges). The cadences
+// outside contribute IV E^2 (d = 0 there): chi^2 = PF[nc] - sum_e (PF[hi_e] - PF[lo_e]) + the window terms, PF the
+// FP64 prefix sums of the FP32 terms IV E^2 (likelihood.py). Same set of terms as before; only the out-of-window
+// terms are summed in FP64 from the prefix sums instead of in FP32 per call.
+template <bool ECC>
+__device__ __forceinline__ void main_loop(int lane, int nc, int ne, const int* __restrict__ EC,
+                                          const double* __restrict__ PF, int call, bool valid, const CallP& P,
+                                          const Data& D, const Body& Pb, const Body& Mb, const float* __restrict__ IV,
+                                          const float* __restrict__ E, int2* __restrict__ Q, int* __restrict__ QN,
+                                          int qcap, float& chi, float& comp, double& flat_in, int& nlimb,
+                                          bool& overflow) {
+    const int mid = SS / 2;
+    for (int e0 = 0; e0 < ne; e0 += 32) {
+        int e = e0 + lane, lo = 0, hi = 0;
+        if (e < ne) {
+            int a = __ldg(&EC[e]), b = __ldg(&EC[e + 1]);
+            float base = __ldg(&D.EDT[e]) - P.dt0 - P.dP * __ldg(&D.EN[e]);
+            float fa = P.B * (base + __ldg(&D.DT[a * SS + mid])) - P.t0s;
+            float fb = P.B * (base + __ldg(&D.DT[(b - 1) * SS + mid])) - P.t0s;
+            if (fa > -P.reach && fb < P.reach) { lo = a; hi = b; }          // the whole epoch (no search)
+            else if (fb <= -P.reach || fa >= P.reach) { lo = hi = a; }     // none of it
+            else {
+                int l = a, h = b;                   // first c with f(c) > -reach
+                if (fa > -P.reach) h = a;
+                while (l < h) {
+                    int m = (l + h) >> 1;
+                    if (P.B * (base + __ldg(&D.DT[m * SS + mid])) - P.t0s > -P.reach) h = m; else l = m + 1;
+                }
+                lo = l;
+                h = b;                              // first c >= lo with f(c) >= reach
+                if (fb < P.reach) l = b;
+                while (l < h) {
+                    int m = (l + h) >> 1;
+                    if (P.B * (base + __ldg(&D.DT[m * SS + mid])) - P.t0s >= P.reach) h = m; else l = m + 1;
+                }
+                hi = l;
+            }
+            flat_in += __ldg(&PF[hi]) - __ldg(&PF[lo]);
+        }
+        int cnt = hi - lo, incl = cnt;
+#pragma unroll
+        for (int o = 1; o < 32; o <<= 1) {
+            int y = __shfl_up_sync(0xffffffffu, incl, o);
+            if (lane >= o) incl += y;
+        }
+        int excl = incl - cnt;
+        int T = __shfl_sync(0xffffffffu, incl, 31);
+        for (int jb = 0; jb < T; jb += 32) {
+            int j = jb + lane;
+            int l = 0;                              // the last lane with excl <= j (its range holds j)
+#pragma unroll
+            for (int s = 16; s > 0; s >>= 1) {
+                int ex = __shfl_sync(0xffffffffu, excl, (l + s) & 31);
+                if (l + s < 32 && ex <= j) l += s;
+            }
+            int lo_l = __shfl_sync(0xffffffffu, lo, l), ex_l = __shfl_sync(0xffffffffu, excl, l);
+            if (j < T)
+                one_cadence<ECC>(lo_l + (j - ex_l), call, valid, P, D, Pb, Mb, IV, E, Q, QN, qcap, chi, comp,
+                                 nlimb, overflow);
+        }
     }
 }
+#endif
 
 // Kernel 1 (the hot path): one warp per call. Cadences with a limb eclipse are left out of the chi^2 and queued
 // as (call, cadence) in Q; limb_fix adds them (GPU_LOG Round 3: the three-circle code in this kernel slowed every
@@ -474,7 +570,8 @@ loglike(const double* __restrict__ TH, int n,
         double t0_ref, double te0, double ed, float hill, float hspan,
         const float* __restrict__ LT, const float* __restrict__ IT,
         double* __restrict__ OUT, int* __restrict__ NLIMB, int2* __restrict__ Q, int* __restrict__ QN, int qcap,
-        CallP* __restrict__ PCG, float* __restrict__ COEF, const int* __restrict__ ACT) {
+        CallP* __restrict__ PCG, float* __restrict__ COEF, const int* __restrict__ ACT,
+        int ne, const int* __restrict__ EC, const double* __restrict__ PF, double pft) {
     __shared__ __align__(16) float sh[WARPS][4][ROW];
     int w = threadIdx.x >> 5, lane = threadIdx.x & 31;
     int call = blockIdx.x * WARPS + w;
@@ -494,13 +591,16 @@ loglike(const double* __restrict__ TH, int n,
     Data D;
     D.DT = DT; D.EP = EP; D.EDT = EDT; D.EN = EN; D.EHI = EHI; D.ELO = ELO;
     float chi = 0.f, comp = 0.f;
+    double flat_in = 0.0;                          // the flat terms IV E^2 of this lane's window ranges
     int nlimb = 0;
     bool overflow = false;
     if (ECC_ON && P.e > 0.f)                       // uniform per call (warp): two loops, the circular one lean
-        main_loop<true>(lane, nc, call, valid, P, D, Pb, Mb, IV, E, Q, QN, qcap, chi, comp, nlimb, overflow);
+        main_loop<true>(lane, nc, ne, EC, PF, call, valid, P, D, Pb, Mb, IV, E, Q, QN, qcap, chi, comp, flat_in,
+                        nlimb, overflow);
     else
-        main_loop<false>(lane, nc, call, valid, P, D, Pb, Mb, IV, E, Q, QN, qcap, chi, comp, nlimb, overflow);
-    double v = (double)chi + (double)comp;
+        main_loop<false>(lane, nc, ne, EC, PF, call, valid, P, D, Pb, Mb, IV, E, Q, QN, qcap, chi, comp, flat_in,
+                         nlimb, overflow);
+    double v = (double)chi + (double)comp - flat_in;
 #pragma unroll
     for (int off = 16; off > 0; off >>= 1) {
         v += __shfl_down_sync(0xffffffffu, v, off);
@@ -508,7 +608,7 @@ loglike(const double* __restrict__ TH, int n,
     }
     overflow = __any_sync(0xffffffffu, overflow);
     if (lane == 0) {
-        double out = valid ? -0.5 * v : -__longlong_as_double(0x7ff0000000000000LL);
+        double out = valid ? -0.5 * (v + pft) : -__longlong_as_double(0x7ff0000000000000LL);
         OUT[call] = overflow ? __longlong_as_double(0x7ff8000000000000LL) : out;   // NaN: queue overflow
         if (NLIMB) NLIMB[call] = nlimb;
     }

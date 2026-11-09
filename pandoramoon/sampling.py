@@ -957,16 +957,20 @@ class NestedSampler:
         uses 5 sub-exposures per cadence (exposure = cadence; SAMPLING.md Round 16: without it the Bayes factor and the
         moon parameters of 30-min data are biased); an integer: that many sub-exposures; None: the likelihood as given.
         (To control the exposure time, pass a likelihood that is already supersampled.)
+    device: "cpu" (default) or "gpu" (the planet+moon fit on an NVIDIA GPU, pandoramoon.gpu; the planet-only fit
+        stays on the CPU and runs concurrently). gpu_options: keyword arguments of pandoramoon.gpu.sampler.GPURunPool
+        (e.g. slots, k) for device="gpu".
     """
 
     def __init__(self, likelihood, priors, model="moon", compare_planet=True, moon_phase="auto", ld_correlation=0.0,
                  log_dir=None, resume="subfolder", threads=None, seed=1, verbose=True, supersampling="auto",
-                 planet_evidence="is", device="cpu"):
+                 planet_evidence="is", device="cpu", gpu_options=None):
         if model not in ("moon", "planet"):
             raise ValueError('model must be "moon" or "planet"')
         if device not in ("cpu", "gpu"):
             raise ValueError('device must be "cpu" or "gpu"')
         self.device = device
+        self.gpu_options = dict(gpu_options or {})
         if resume not in ("subfolder", "resume", "overwrite"):
             raise ValueError('resume must be "subfolder", "resume" or "overwrite"')
         self.supersampling_note = None
@@ -1111,7 +1115,7 @@ class NestedSampler:
             if not done:
                 kw_m = kw
                 if self.device == "gpu" and name == "moon":
-                    kw_m = dict(kw, backend="gpu", gpu=dict(evaluator=self._gpu_evaluator(m)))
+                    kw_m = dict(kw, backend="gpu", gpu=dict(self.gpu_options, evaluator=self._gpu_evaluator(m)))
                 return_value = _fit_model(m, kw_m, store, mode, hs, self.verbose, name, max_weighted=max_weighted_samples,
                                        progress=self.verbose if progress is None else progress, hash_parts=hparts)
 
