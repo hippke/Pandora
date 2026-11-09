@@ -20,8 +20,11 @@ r = data - f = (data - 1) + D (deficit D = 1 - f, nonzero only near the transits
 
 The SHO is a two-state linear stochastic differential equation, so L^-1 is its Kalman filter: with fixed
 hyperparameters the gains, the innovation variances and e are computed once (``gp_setup``, float64), and each
-likelihood call only filters D (a two-number state recursion from the first to the last cadence of the model's
-window; the remaining cadences, where D = 0, are one closed-form term: ``gp_quad``). The log-likelihood is
+likelihood call only filters D (a two-number state recursion over the cadences of the model's windows; the
+remaining cadences, where D = 0, are closed-form terms: ``gp_quad``). Between windows the D-filter's state decays
+without input; after a gap longer than its horizon H (``gp_horizon``: the zero-input steps after which the state's
+influence is below 1e-12) the gap is not stepped: the decaying state's terms are the closed-form tail, and the next
+window starts from state 0 (dropped: cross terms below ~1e-8 nats). The log-likelihood is
 
     log L = -chi^2 / 2 - (sum_k ln L_kk - sum_k ln yerr_k)
 
@@ -241,19 +244,23 @@ class GP(object):
         return seg
 
     def setup(self, t, y1, valid, yerr):
-        """the tables of the likelihood (gp_setup / gp_setup_ss) at the ascending cadence times t, y1 = data - 1"""
+        """the tables of the likelihood at the ascending cadence times t, y1 = data - 1: (F, K, irs, e, W, v, H, c0,
+        ld) of gp_setup / gp_setup_ss with the horizons H (gp_horizon) after v"""
         var = np.ascontiguousarray((self.err_scale * yerr) ** 2)
         if self.is_simple():
-            return gp_setup(t, y1, var, valid, yerr, self.amp, self.tau)
-        kind, pa, pb, pc = self.blocks()
-        return gp_setup_ss(t, y1, var, valid, yerr, kind, pa, pb, pc, self.segment_starts(t))
+            F, K, irs, e, W, v, c0, ld = gp_setup(t, y1, var, valid, yerr, self.amp, self.tau)
+        else:
+            kind, pa, pb, pc = self.blocks()
+            F, K, irs, e, W, v, c0, ld = gp_setup_ss(t, y1, var, valid, yerr, kind, pa, pb, pc,
+                                                     self.segment_starts(t))
+        return F, K, irs, e, W, v, gp_horizon(F, K), c0, ld
 
     def loglike_noise(self, time, flux, yerr, mask=None):
         """log likelihood of the light curve under the GP alone (model flux 1 everywhere), relative to the white-noise
         normalisation as in Likelihood; points with mask True (or non-finite flux / yerr) are left out"""
         t, y1, yerr_, valid = _prepare(time, flux, yerr, mask)
         tab = self.setup(t, y1, valid, yerr_)
-        return -0.5 * tab[6] - tab[7]
+        return -0.5 * tab[-2] - tab[-1]
 
     @classmethod
     def fit(cls, time, flux, yerr, mask=None, err_scale=None, amp_bounds=None, tau_bounds=None, bin_width=10.0 / 1440,
@@ -896,7 +903,7 @@ def gp_setup_ss(t, y1, var, valid, yerr, kind, pa, pb, pc, seg):
 
 
 @jit(cache=True, nopython=True, fastmath=True)
-def _gp_quad_ss(out_idx, Dv, F, K, irs, e, W, v):
+def _gp_quad_ss(out_idx, Dv, F, K, irs, e, W, v, H):
     """gp_quad with d states (K.shape[1])"""
     nk = out_idx.shape[0]
     if nk == 0:
@@ -905,11 +912,11 @@ def _gp_quad_ss(out_idx, Dv, F, K, irs, e, W, v):
     m = np.zeros(d)
     mn = np.zeros(d)
     acc = 0.0
-    i0 = out_idx[0]
-    i1 = out_idx[nk - 1]
+    c = out_idx[0]
+    start = c
     k = 0
-    for c in range(i0, i1 + 1):
-        if c > i0:
+    while True:
+        if c > start:
             for a in range(d):
                 x = 0.0
                 for b in range(d):
@@ -918,7 +925,7 @@ def _gp_quad_ss(out_idx, Dv, F, K, irs, e, W, v):
             for a in range(d):
                 m[a] = mn[a]
         dd = 0.0
-        if k < nk and out_idx[k] == c:
+        if out_idx[k] == c:
             dd = Dv[k]
             k += 1
         inn = dd - m[0]
@@ -926,11 +933,32 @@ def _gp_quad_ss(out_idx, Dv, F, K, irs, e, W, v):
         acc += dw * (dw + 2.0 * e[c])
         for a in range(d):
             m[a] += K[c, a] * inn
+        if k == nk:
+            break
+        s = out_idx[k]
+        if s - c > H[c]:
+            # the gap to the next window cadence is longer than the horizon: the tail of the decaying state, then
+            # the next window from state 0
+            acc += _tail_ss(W, v, c, m)
+            for a in range(d):
+                m[a] = 0.0
+            c = s
+            start = s
+        else:
+            c += 1
+    return acc + _tail_ss(W, v, c, m)
+
+
+@jit(cache=True, nopython=True, fastmath=True)
+def _tail_ss(W, v, c, m):
+    """the zero-input tail after cadence c of the filtered D-state m: m' W_c m + 2 v_c' m"""
+    d = m.shape[0]
+    acc = 0.0
     q = 0
     for a in range(d):
-        acc += 2.0 * v[i1, a] * m[a]
+        acc += 2.0 * v[c, a] * m[a]
         for b in range(a, d):
-            acc += (1.0 if a == b else 2.0) * W[i1, q] * m[a] * m[b]
+            acc += (1.0 if a == b else 2.0) * W[c, q] * m[a] * m[b]
             q += 1
     return acc
 
@@ -1258,28 +1286,29 @@ def gp_setup(t, y1, var, valid, yerr, amp, tau):
 
 
 @jit(cache=True, nopython=True, fastmath=True)
-def gp_quad(out_idx, Dv, F, K, irs, e, W, v):
+def gp_quad(out_idx, Dv, F, K, irs, e, W, v, H):
     """sum_k Dw_k^2 + 2 e_k Dw_k (Dw = L^-1 D) for the deficit D = Dv at the ascending output cadences out_idx
-    (0 elsewhere): the D-filter from the first to the last of them, plus the closed-form tail (d = K.shape[1]
+    (0 elsewhere): the D-filter over the window cadences and the gaps between them shorter than the horizon H
+    (gp_horizon), the closed-form tail after each stretch (the next one starts from state 0) (d = K.shape[1]
     states; d > 2: _gp_quad_ss)"""
     if K.shape[1] != 2:
-        return _gp_quad_ss(out_idx, Dv, F, K, irs, e, W, v)
+        return _gp_quad_ss(out_idx, Dv, F, K, irs, e, W, v, H)
     nk = out_idx.shape[0]
     if nk == 0:
         return 0.0
     acc = 0.0
     m0 = 0.0
     m1 = 0.0
-    i0 = out_idx[0]
-    i1 = out_idx[nk - 1]
+    c = out_idx[0]
+    start = c
     k = 0
-    for c in range(i0, i1 + 1):
-        if c > i0:
+    while True:
+        if c > start:
             nm0 = F[c, 0] * m0 + F[c, 1] * m1
             m1 = F[c, 2] * m0 + F[c, 3] * m1
             m0 = nm0
         d = 0.0
-        if k < nk and out_idx[k] == c:
+        if out_idx[k] == c:
             d = Dv[k]
             k += 1
         inn = d - m0
@@ -1287,8 +1316,109 @@ def gp_quad(out_idx, Dv, F, K, irs, e, W, v):
         acc += dw * (dw + 2.0 * e[c])
         m0 += K[c, 0] * inn
         m1 += K[c, 1] * inn
-    acc += W[i1, 0] * m0 * m0 + 2.0 * W[i1, 1] * m0 * m1 + W[i1, 2] * m1 * m1 + 2.0 * (v[i1, 0] * m0 + v[i1, 1] * m1)
+        if k == nk:
+            break
+        s = out_idx[k]
+        if s - c > H[c]:
+            acc += (W[c, 0] * m0 * m0 + 2.0 * W[c, 1] * m0 * m1 + W[c, 2] * m1 * m1
+                    + 2.0 * (v[c, 0] * m0 + v[c, 1] * m1))
+            m0 = 0.0
+            m1 = 0.0
+            c = s
+            start = s
+        else:
+            c += 1
+    acc += W[c, 0] * m0 * m0 + 2.0 * W[c, 1] * m0 * m1 + W[c, 2] * m1 * m1 + 2.0 * (v[c, 0] * m0 + v[c, 1] * m1)
     return acc
+
+
+@jit(cache=True, nopython=True)
+def gp_horizon(F, K, eps=1e-12, block=16):
+    """H[c]: the zero-input steps of the D-filter after cadence c until its transition Phi(c -> c + H) =
+    A_(c+H) ... A_(c+1), A_j = (I - K_j e0') F_j, is below eps in the infinity norm (n - c: never within the data).
+    gp_quad steps a gap between window cadences c and s only if s - c <= H[c]; otherwise the dropped terms (the
+    decaying state's cross terms with the next windows' deficits) are ~eps x the chi^2 terms involved. A segment
+    start (F = 0) ends the horizon. Blocked (n block d^3 + n / block H d^3 instead of n H d^3): explicit steps from c
+    to the next block start b; beyond it |Phi(c -> j)| <= |Phi(b -> j)| r with r = |Phi(c -> b)|, so H[c] =
+    (b - c) + the horizon of b for the tolerance eps / r, from a ladder of tolerances eps 2^k (k = -7 ... 40) kept
+    at the block starts: at most a factor 2 (a few steps) beyond the exact horizon; explicit search when r > 128.
+    block >= n: the exact horizon everywhere (tests)."""
+    n, d = K.shape
+    H = np.empty(n, np.int64)
+    KLO, KHI = -7, 40
+    nb = (n + block - 1) // block
+    Hb = np.empty((nb, KHI - KLO + 1), np.int64)
+    P = np.empty((d, d))
+    Q = np.empty((d, d))
+
+    def step(j, P, Q):
+        # P <- A_j P; returns |P| (infinity norm)
+        for i in range(d):
+            for k in range(d):
+                x = 0.0
+                for l in range(d):
+                    x += F[j, i * d + l] * P[l, k]
+                Q[i, k] = x
+        big = 0.0
+        for i in range(d):
+            r = 0.0
+            for k in range(d):
+                P[i, k] = Q[i, k] - K[j, i] * Q[0, k]
+                r += abs(P[i, k])
+            big = max(big, r)
+        return big
+
+    def eye(P):
+        for i in range(d):
+            for k in range(d):
+                P[i, k] = 1.0 if i == k else 0.0
+
+    def search(c, lim, tol, P, Q):
+        # the first j in (c, lim] with |Phi(c -> j)| < tol (-1 if none); P = Phi(c -> min(j, lim))
+        eye(P)
+        for j in range(c + 1, lim + 1):
+            if step(j, P, Q) < tol:
+                return j
+        return -1
+
+    if block < n:
+        for ib in range(nb):
+            b = ib * block
+            for kk in range(KHI - KLO + 1):
+                Hb[ib, kk] = n - b                   # not reached within the data
+            eye(P)
+            kc = KHI                                 # the loosest tolerance not reached yet
+            for j in range(b + 1, n):
+                nrm = step(j, P, Q)
+                while kc >= KLO and nrm < eps * 2.0 ** kc:
+                    Hb[ib, kc - KLO] = j - b
+                    kc -= 1
+                if kc < KLO:
+                    break
+    for c in range(n):
+        b2 = (c // block + 1) * block
+        if c % block == 0 or b2 >= n:
+            j = search(c, n - 1, eps, P, Q)
+            H[c] = (j - c) if j >= 0 else n - c
+            continue
+        j = search(c, b2, eps, P, Q)
+        if j >= 0:
+            H[c] = j - c
+            continue
+        r = 0.0
+        for i in range(d):
+            x = 0.0
+            for k in range(d):
+                x += abs(P[i, k])
+            r = max(r, x)
+        if r > 2.0 ** -KLO:
+            j = search(c, n - 1, eps, P, Q)
+            H[c] = (j - c) if j >= 0 else n - c
+            continue
+        k = min(KHI, int(math.floor(-math.log2(max(r, 1e-300)))))
+        hb = Hb[b2 // block, k - KLO]
+        H[c] = (b2 - c) + hb if b2 + hb < n else n - c
+    return H
 
 
 @jit(cache=True, nopython=True, fastmath=True)
@@ -1311,7 +1441,7 @@ def pandora_loglike_gp(
     t0_bary, t0_bary_offset, M_planet, r_moon, per_moon, tau_moon, Omega_moon,
     i_moon, ecc_moon, w_moon, M_moon, epoch_distance, supersampling_factor,
     occult_small_threshold, hill_sphere_threshold, time,
-    F, K, irs, e, W, v, c0, ld, cache, time_sorted
+    F, K, irs, e, W, v, H, c0, ld, cache, time_sorted
 ):
     """pandora_loglike() with the GP noise model (module docstring): the same window model, the deficits of the
     output cadences it touches, and the GP chi^2 of gp_quad"""
@@ -1334,7 +1464,7 @@ def pandora_loglike_gp(
     Dv = np.empty(len(ft))
     for k in range(len(ft)):
         Dv[k] = 1.0 - ft[k]
-    return -0.5 * (c0 + gp_quad(out_idx, Dv, F, K, irs, e, W, v)) - ld
+    return -0.5 * (c0 + gp_quad(out_idx, Dv, F, K, irs, e, W, v, H)) - ld
 
 
 @jit(cache=True, nopython=True, fastmath=True)
@@ -1342,7 +1472,7 @@ def pandora_loglike_planet_gp(
     u1, u2, R_star, per_bary, a_bary, r_planet, b_bary, w_bary, ecc_bary,
     t0_bary, t0_bary_offset, M_planet, epoch_distance, supersampling_factor,
     occult_small_threshold, hill_sphere_threshold, time,
-    F, K, irs, e, W, v, c0, ld, cache, time_sorted
+    F, K, irs, e, W, v, H, c0, ld, cache, time_sorted
 ):
     """pandora_loglike_planet() with the GP noise model: the planet's z^2 and flux on its transit windows (the fast
     path of pandora_loglike_planet), else pandora_loglike_gp with the planet-only moon parameters"""
@@ -1368,7 +1498,7 @@ def pandora_loglike_planet_gp(
             u1, u2, R_star, per_bary, a_bary, r_planet, b_bary, w_bary, ecc_bary,
             t0_bary, t0_bary_offset, M_planet, r_m, p_m, tau_m, om_m, i_m, e_m,
             w_m, m_m, epoch_distance, supersampling_factor, occult_small_threshold,
-            hill_sphere_threshold, time, F, K, irs, e, W, v, c0, ld, cache, time_sorted
+            hill_sphere_threshold, time, F, K, irs, e, W, v, H, c0, ld, cache, time_sorted
         )
     idx = _runs_idx(los, his)
     b2 = float(b_bary) * float(b_bary)
@@ -1387,7 +1517,7 @@ def pandora_loglike_planet_gp(
     Dv = np.empty(len(ft))
     for k in range(len(ft)):
         Dv[k] = 1.0 - ft[k]
-    return -0.5 * (c0 + gp_quad(out_idx, Dv, F, K, irs, e, W, v)) - ld
+    return -0.5 * (c0 + gp_quad(out_idx, Dv, F, K, irs, e, W, v, H)) - ld
 
 
 @jit(cache=True, nopython=True)

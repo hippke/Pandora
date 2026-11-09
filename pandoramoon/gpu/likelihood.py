@@ -127,7 +127,7 @@ class GPULikelihood:
         if self.gp:
             if not self.windows:
                 raise ValueError("GPULikelihood: the GP needs the windowed cadence loop (no NO_WINDOW)")
-            F, K, irs, e, W, v, c0, ld = like.gp_tables
+            F, K, irs, e, W, v, H, c0, ld = like.gp_tables
             if len(irs) != nc:
                 raise ValueError("GPULikelihood: GP tables do not match the cadences")
             self.gp_d = int(K.shape[1])            # states (2: one SHO term; general model: up to 8)
@@ -143,9 +143,13 @@ class GPULikelihood:
                 self.gp_chunk = tb["C"]
                 self.d.update(GSTEP=cuda.to_device(tb["step"]), GT=f32(tb["T"]), GKIE=f32(tb["kie"]),
                               GW=f32(tb["w"]), GM=f32(tb["M"]))
-                gp_defs = (("GP_D", str(self.gp_d)), ("GP_NSHO", str(tb["nsho"])), ("GP_BASE", str(tb["base"])))
+                # GP_SCAN: the warp scan's cost per run in cadence steps (d x d maps; model.cu gp_use_span)
+                gp_defs = (("GP_D", str(self.gp_d)), ("GP_NSHO", str(tb["nsho"])), ("GP_BASE", str(tb["base"])),
+                           ("GP_SCAN", str(2 * (self.gp_d ** 2 + self.gp_d))))
+            # gap skipping (gp.gp_horizon): the horizon per cadence, and per call the runs of windows (gp_runs)
+            self.d["GH"] = cuda.to_device(np.minimum(np.asarray(H), nc).astype(np.int32))
             self.gp_c0, self.gp_ld = float(c0), float(ld)
-            self._gdb = self._glh = None
+            self._gdb = self._glh = self._grun = None
             extra = tuple(extra) + (("GP", "1"),) + (gp_defs if self.gp_d != 2 else ())
         self.mod = _cuda.module(ss, warps, minb, tuple(extra) + (() if self.eccentric else (("NO_ECC", "1"),)))
         a = self.mod.get_kernel("loglike").attributes
@@ -199,6 +203,7 @@ class GPULikelihood:
             if self._gdb is None or self._gdb.shape[0] < n:
                 self._gdb = cuda.device_array((n, self.nc), np.float32)
                 self._glh = cuda.device_array((n, ne, 2), np.int32)
+                self._grun = cuda.device_array((n, ne, 4), np.int32)
             gpa = (_cuda.ptr(self._gdb), _cuda.ptr(self._glh))
         if main:
             _cuda.launch(self.kernel, grid, 32 * self.warps,
@@ -224,7 +229,8 @@ class GPULikelihood:
                     (_cuda.ptr(d["GSTEP"]), _cuda.ptr(d["GT"]), _cuda.ptr(d["GKIE"]), _cuda.ptr(d["GW"]),
                      _cuda.ptr(d["GM"]), np.int32(self.gp_chunk)))
             _cuda.launch(self.kernel_gp, (n + 3) // 4, 128, np.int32(n), np.int32(self.nc), np.int32(len(self.te)),
-                         gpa[1], gpa[0], *tabs, np.float64(self.gp_c0), np.float64(self.gp_ld),
+                         gpa[1], gpa[0], _cuda.ptr(d["GH"]), _cuda.ptr(self._grun), *tabs,
+                         np.float64(self.gp_c0), np.float64(self.gp_ld),
                          _cuda.ptr(dOUT), _cuda.ptr(dACT))
 
     def __call__(self, theta, check=True, return_nlimb=False):

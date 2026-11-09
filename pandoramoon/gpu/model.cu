@@ -710,6 +710,75 @@ extern "C" __global__ void limb_fix(const float* __restrict__ DT, const int* __r
 // (valid, no queue overflow).
 // GP_D: the number of states (pandoramoon.gp's general model, GP(terms=..., baseline=..., gap=...)); 2 (default):
 // the code below with the packed float4 tables; > 2: the same two passes with d x d maps (after this one).
+// Gap skipping (pandoramoon.gp.gp_quad, gp_horizon): consecutive epoch windows are one run when the gap between
+// them is at most the horizon GH of the earlier window's last cadence, else the decaying state's terms are its tail
+// and the next window starts a new run from state 0. gp_runs (warp-collective, lanes = epochs in groups of 32)
+// writes the runs (first cadence, last cadence, first epoch) to RUN and returns their number. Few runs: each by the
+// whole warp (two-pass span algorithm), many: one lane per run.
+// The choice per call (cost in cadence steps of one lane): the warp's span algorithm, two passes over T / 32
+// cadences per lane plus a scan per run (GP_SCAN steps), vs one lane per run, ceil(R / 32) rounds of the longest
+// run. GP_RSEQ (tests, benchmarks): force the span algorithm for R <= GP_RSEQ and one lane per run above.
+#ifndef GP_SCAN
+#define GP_SCAN 16
+#endif
+__device__ __forceinline__ bool gp_use_span(const int4* __restrict__ RUN, int R, int lane) {
+#ifdef GP_RSEQ
+    return R <= GP_RSEQ;
+#else
+    int tot = 0, mx = 0;
+    for (int k = lane; k < R; k += 32) {
+        int4 ru = RUN[k];
+        int len = ru.y - ru.x + 1;
+        tot += len;
+        mx = max(mx, len);
+    }
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) {
+        tot += __shfl_xor_sync(0xffffffffu, tot, o);
+        mx = max(mx, __shfl_xor_sync(0xffffffffu, mx, o));
+    }
+    int span_cost = 2 * ((tot + 31) >> 5) + R * GP_SCAN;
+    int lane_cost = ((R + 31) >> 5) * mx;
+    return span_cost < lane_cost;
+#endif
+}
+__device__ __forceinline__ int gp_runs(int ne, const int2* __restrict__ LH, const int* __restrict__ GH,
+                                       int4* __restrict__ RUN, int lane) {
+    const unsigned full = 0xffffffffu;
+    unsigned lt = (1u << lane) - 1u, le = lt | (1u << lane);
+    int R = 0, prev = -1, pend = -1;               // runs so far; last window cadence so far; run awaiting its end
+    for (int e0 = 0; e0 < ne; e0 += 32) {
+        int e = e0 + lane;
+        int2 r = (e < ne) ? LH[e] : make_int2(0, 0);
+        bool nonempty = r.y > r.x;
+        int val = nonempty ? r.y - 1 : -1, inc = val;
+#pragma unroll
+        for (int o = 1; o < 32; o <<= 1) {
+            int y = __shfl_up_sync(full, inc, o);
+            if (lane >= o) inc = max(inc, y);
+        }
+        int exc = __shfl_up_sync(full, inc, 1);
+        int cp = max(lane ? exc : -1, prev);       // the previous window's last cadence
+        bool nw = nonempty && (cp < 0 || r.x - cp > __ldg(&GH[cp]));
+        unsigned bn = __ballot_sync(full, nw), be = __ballot_sync(full, nonempty);
+        int ridx = R + __popc(bn & le) - 1;        // this epoch's run
+        if (nw) RUN[ridx] = make_int4(r.x, r.y - 1, e, 0);
+        __syncwarp();
+        unsigned above = be & ~le;
+        if (nonempty && above && ((bn >> (__ffs(above) - 1)) & 1u)) RUN[ridx].y = r.y - 1;   // its run ends here
+        if (be) {
+            if (lane == 0 && pend >= 0 && ((bn >> (__ffs(be) - 1)) & 1u)) RUN[pend].y = prev;
+            int l = 31 - __clz(be);
+            prev = __shfl_sync(full, val, l);
+            pend = __shfl_sync(full, ridx, l);
+            R += __popc(bn);
+        }
+    }
+    if (lane == 0 && pend >= 0) RUN[pend].y = prev;
+    __syncwarp();
+    return R;
+}
+
 #ifndef GP_D
 #define GP_D 2
 #endif
@@ -733,34 +802,16 @@ __device__ __forceinline__ GAff gaff_then(const GAff& A, const GAff& B) {
     return r;
 }
 
-extern "C" __global__ void gp_pass(int n, int nc, int ne, const int2* __restrict__ GLH_all,
-                                   const float* __restrict__ GDB_all, const float4* __restrict__ GF,
-                                   const float4* __restrict__ GKE, const float4* __restrict__ GW,
-                                   double c0, double ld, double* __restrict__ OUT, const int* __restrict__ ACT) {
-    int call = (blockIdx.x * blockDim.x + threadIdx.x) >> 5, lane = threadIdx.x & 31;
-    if (call >= n) return;
-    if (ACT && !ACT[call]) return;
-    if (!(OUT[call] == 0.0)) return;               // invalid (-inf) or queue overflow (NaN): as kernel 1 set it
-    const int2* LH = GLH_all + (size_t)call * ne;
-    const float* DB = GDB_all + (size_t)call * nc;
-    int first = 0x7fffffff, last = -1;
-    for (int e = lane; e < ne; e += 32) {
-        int2 r = LH[e];
-        if (r.y > r.x) { first = min(first, r.x); last = max(last, r.y - 1); }
-    }
-#pragma unroll
-    for (int o = 16; o > 0; o >>= 1) {
-        first = min(first, __shfl_xor_sync(0xffffffffu, first, o));
-        last = max(last, __shfl_xor_sync(0xffffffffu, last, o));
-    }
-    if (last < 0) {
-        if (lane == 0) OUT[call] = -0.5 * c0 - ld;
-        return;
-    }
+// the warp's span algorithm on one run [first, last] (from state 0; e_start: its first epoch): returns (on lane 0)
+// the run's chi^2 terms plus the closed-form tail after last
+__device__ __forceinline__ double gp_span2(int first, int last, int e_start, int ne, int lane,
+                                           const int2* __restrict__ LH, const float* __restrict__ DB,
+                                           const float4* __restrict__ GF, const float4* __restrict__ GKE,
+                                           const float4* __restrict__ GW) {
     int span = last - first + 1, ch = (span + 31) >> 5;
     int a = first + lane * ch, b = min(a + ch, last + 1);
-    int e0 = 0;                                    // the epoch window at or after a
-    int2 r0 = LH[0];
+    int e0 = e_start;                              // the epoch window at or after a
+    int2 r0 = LH[e0];
     while (a >= r0.y && e0 + 1 < ne) r0 = LH[++e0];
     // pass 1: the chunk's affine map
     GAff g;
@@ -824,14 +875,73 @@ extern "C" __global__ void gp_pass(int n, int nc, int ne, const int2* __restrict
     // the filtered state after the last cadence: held by the lane whose chunk ends at last
     int L = (span - 1) / ch;
     float f0 = __shfl_sync(0xffffffffu, m0, L), f1 = __shfl_sync(0xffffffffu, m1, L);
-    if (lane == 0) {
-        float4 wq = __ldg(&GW[2 * last]);          // (W00, W01, W11, 0), (v0, v1, 0, 0)
-        float4 vv = __ldg(&GW[2 * last + 1]);
-        double tail = (double)wq.x * f0 * f0 + 2.0 * (double)wq.y * f0 * f1 + (double)wq.z * f1 * f1
-                      + 2.0 * ((double)vv.x * f0 + (double)vv.y * f1);
-        OUT[call] = -0.5 * (c0 + v + tail) - ld;
-    }
+    float4 wq = __ldg(&GW[2 * last]);              // (W00, W01, W11, 0), (v0, v1, 0, 0)
+    float4 vv = __ldg(&GW[2 * last + 1]);
+    return v + (double)wq.x * f0 * f0 + 2.0 * (double)wq.y * f0 * f1 + (double)wq.z * f1 * f1
+           + 2.0 * ((double)vv.x * f0 + (double)vv.y * f1);
 }
+
+// one run [first, last] by one lane, from state 0 (sequential): its chi^2 terms plus the tail
+__device__ __forceinline__ double gp_run2(int first, int last, int e, int ne, const int2* __restrict__ LH,
+                                          const float* __restrict__ DB, const float4* __restrict__ GF,
+                                          const float4* __restrict__ GKE, const float4* __restrict__ GW) {
+    int2 r = LH[e];
+    float m0 = 0.f, m1 = 0.f, acc = 0.f, comp = 0.f;
+    for (int c = first; c <= last; ++c) {
+        if (c > first) {
+            float4 f = __ldg(&GF[c]);
+            float n0 = f.x * m0 + f.y * m1;
+            m1 = f.z * m0 + f.w * m1;
+            m0 = n0;
+        }
+        while (c >= r.y && e + 1 < ne) r = LH[++e];
+        float d = (c >= r.x && c < r.y) ? DB[c] : 0.f;
+        float inn = d - m0;
+        float4 kg = __ldg(&GKE[c]);
+        float dw = inn * kg.z;
+        float t = dw * (dw + 2.f * kg.w);
+        float s2 = acc + t;
+        comp += (fabsf(acc) >= fabsf(t)) ? (acc - s2) + t : (t - s2) + acc;
+        acc = s2;
+        m0 += kg.x * inn;
+        m1 += kg.y * inn;
+    }
+    float4 wq = __ldg(&GW[2 * last]);
+    float4 vv = __ldg(&GW[2 * last + 1]);
+    return (double)acc + (double)comp + (double)wq.x * m0 * m0 + 2.0 * (double)wq.y * m0 * m1
+           + (double)wq.z * m1 * m1 + 2.0 * ((double)vv.x * m0 + (double)vv.y * m1);
+}
+
+extern "C" __global__ void gp_pass(int n, int nc, int ne, const int2* __restrict__ GLH_all,
+                                   const float* __restrict__ GDB_all, const int* __restrict__ GH,
+                                   int4* __restrict__ GRUN_all, const float4* __restrict__ GF,
+                                   const float4* __restrict__ GKE, const float4* __restrict__ GW,
+                                   double c0, double ld, double* __restrict__ OUT, const int* __restrict__ ACT) {
+    int call = (blockIdx.x * blockDim.x + threadIdx.x) >> 5, lane = threadIdx.x & 31;
+    if (call >= n) return;
+    if (ACT && !ACT[call]) return;
+    if (!(OUT[call] == 0.0)) return;               // invalid (-inf) or queue overflow (NaN): as kernel 1 set it
+    const int2* LH = GLH_all + (size_t)call * ne;
+    const float* DB = GDB_all + (size_t)call * nc;
+    int4* RUN = GRUN_all + (size_t)call * ne;
+    int R = gp_runs(ne, LH, GH, RUN, lane);
+    double v = 0.0;
+    if (gp_use_span(RUN, R, lane)) {
+        for (int k = 0; k < R; ++k) {
+            int4 ru = RUN[k];
+            v += gp_span2(ru.x, ru.y, ru.z, ne, lane, LH, DB, GF, GKE, GW);
+        }
+    } else {
+        for (int k = lane; k < R; k += 32) {
+            int4 ru = RUN[k];
+            v += gp_run2(ru.x, ru.y, ru.z, ne, LH, DB, GF, GKE, GW);
+        }
+#pragma unroll
+        for (int o = 16; o > 0; o >>= 1) v += __shfl_down_sync(0xffffffffu, v, o);
+    }
+    if (lane == 0) OUT[call] = -0.5 * (c0 + v) - ld;
+}
+
 #else
 // d = GP_D > 2 states (GP_NSHO SHO blocks of 2, then GP_BASE baseline states: 0, 1 offset, 2 offset + slope), in the
 // blocks' own coordinates: F is block-diagonal and depends only on the time step, the observed sum is h . m (the
@@ -899,40 +1009,37 @@ __device__ __forceinline__ float gpd_step(float* m, int c, bool pred, float d, c
     return inn;
 }
 
-extern "C" __global__ void gp_pass(int n, int nc, int ne, const int2* __restrict__ GLH_all,
-                                   const float* __restrict__ GDB_all, const int* __restrict__ GSTEP,
-                                   const float* __restrict__ GT, const float* __restrict__ GKIE,
-                                   const float* __restrict__ GW, const float* __restrict__ GM, int C,
-                                   double c0, double ld, double* __restrict__ OUT, const int* __restrict__ ACT) {
-    int call = (blockIdx.x * blockDim.x + threadIdx.x) >> 5, lane = threadIdx.x & 31;
-    if (call >= n) return;
-    if (ACT && !ACT[call]) return;
-    if (!(OUT[call] == 0.0)) return;
-    const int2* LH = GLH_all + (size_t)call * ne;
-    const float* DB = GDB_all + (size_t)call * nc;
-    int first = 0x7fffffff, last = -1;
-    for (int e = lane; e < ne; e += 32) {
-        int2 r = LH[e];
-        if (r.y > r.x) { first = min(first, r.x); last = max(last, r.y - 1); }
-    }
+// the closed-form tail m' W m + 2 v' m at a cadence (w: W's upper triangle row-major, then v)
+__device__ __forceinline__ double gpd_tail(const float* __restrict__ w, const float* m) {
+    double tail = 0.0;
+    int q = 0;
 #pragma unroll
-    for (int o = 16; o > 0; o >>= 1) {
-        first = min(first, __shfl_xor_sync(0xffffffffu, first, o));
-        last = max(last, __shfl_xor_sync(0xffffffffu, last, o));
+    for (int i = 0; i < GD; ++i) {
+        tail += 2.0 * (double)__ldg(&w[GNW + i]) * m[i];
+#pragma unroll
+        for (int j = i; j < GD; ++j) {
+            tail += (i == j ? 1.0 : 2.0) * (double)__ldg(&w[q]) * m[i] * m[j];
+            ++q;
+        }
     }
-    if (last < 0) {
-        if (lane == 0) OUT[call] = -0.5 * c0 - ld;
-        return;
-    }
+    return tail;
+}
+
+// the warp's span algorithm on one run [first, last] (from state 0): its chi^2 terms plus the tail (on lane 0)
+__device__ __forceinline__ double gp_spand(int first, int last, int e_start, int ne, int lane,
+                                           const int2* __restrict__ LH, const float* __restrict__ DB,
+                                           const int* __restrict__ GSTEP, const float* __restrict__ GT,
+                                           const float* __restrict__ GKIE, const float* __restrict__ GW,
+                                           const float* __restrict__ GM, int C) {
     // lanes take consecutive grid chunks j0 ... j1 (cpl each); lane 0 starts at first (its map's matrix part is
-    // never used: the span starts from m = 0), the lane holding last ends there (its matrix part is not used either)
+    // never used: the run starts from m = 0), the lane holding last ends there (its matrix part is not used either)
     int j0 = first / C, j1 = last / C, nch = j1 - j0 + 1, cpl = (nch + 31) >> 5;
     int js = j0 + lane * cpl, je = min(js + cpl, j1 + 1);
     int a = (js <= j1) ? max(first, js * C) : last + 1;
     int b = (js <= j1) ? min(last + 1, je * C) : last + 1;
     int L = (j1 - j0) / cpl;
-    int e0 = 0;
-    int2 r0 = LH[0];
+    int e0 = e_start;
+    int2 r0 = LH[e0];
     while (a >= r0.y && e0 + 1 < ne) r0 = LH[++e0];
     GAffD g;
 #pragma unroll
@@ -1004,21 +1111,62 @@ extern "C" __global__ void gp_pass(int n, int nc, int ne, const int2* __restrict
     float fs[GD];
 #pragma unroll
     for (int i = 0; i < GD; ++i) fs[i] = __shfl_sync(0xffffffffu, m[i], L);
-    if (lane == 0) {
-        const float* w = GW + (size_t)last * (GNW + GD);
-        double tail = 0.0;
-        int q = 0;
+    return v + gpd_tail(GW + (size_t)last * (GNW + GD), fs);
+}
+
+// one run [first, last] by one lane, from state 0 (sequential): its chi^2 terms plus the tail
+__device__ __forceinline__ double gp_rund(int first, int last, int e, int ne, const int2* __restrict__ LH,
+                                          const float* __restrict__ DB, const int* __restrict__ GSTEP,
+                                          const float* __restrict__ GT, const float* __restrict__ GKIE,
+                                          const float* __restrict__ GW) {
+    int2 r = LH[e];
+    float m[GD];
 #pragma unroll
-        for (int i = 0; i < GD; ++i) {
-            tail += 2.0 * (double)__ldg(&w[GNW + i]) * fs[i];
-#pragma unroll
-            for (int j = i; j < GD; ++j) {
-                tail += (i == j ? 1.0 : 2.0) * (double)__ldg(&w[q]) * fs[i] * fs[j];
-                ++q;
-            }
-        }
-        OUT[call] = -0.5 * (c0 + v + tail) - ld;
+    for (int i = 0; i < GD; ++i) m[i] = 0.f;
+    float acc = 0.f, comp = 0.f;
+    for (int c = first; c <= last; ++c) {
+        while (c >= r.y && e + 1 < ne) r = LH[++e];
+        float d = (c >= r.x && c < r.y) ? DB[c] : 0.f;
+        const float* kie = GKIE + (size_t)c * (GD + 2);
+        float inn = gpd_step(m, c, c > first, d, GSTEP, GT, kie);
+        float dw = inn * __ldg(&kie[GD]);
+        float t = dw * (dw + 2.f * __ldg(&kie[GD + 1]));
+        float s2 = acc + t;
+        comp += (fabsf(acc) >= fabsf(t)) ? (acc - s2) + t : (t - s2) + acc;
+        acc = s2;
     }
+    return (double)acc + (double)comp + gpd_tail(GW + (size_t)last * (GNW + GD), m);
+}
+
+extern "C" __global__ void gp_pass(int n, int nc, int ne, const int2* __restrict__ GLH_all,
+                                   const float* __restrict__ GDB_all, const int* __restrict__ GH,
+                                   int4* __restrict__ GRUN_all, const int* __restrict__ GSTEP,
+                                   const float* __restrict__ GT, const float* __restrict__ GKIE,
+                                   const float* __restrict__ GW, const float* __restrict__ GM, int C,
+                                   double c0, double ld, double* __restrict__ OUT, const int* __restrict__ ACT) {
+    int call = (blockIdx.x * blockDim.x + threadIdx.x) >> 5, lane = threadIdx.x & 31;
+    if (call >= n) return;
+    if (ACT && !ACT[call]) return;
+    if (!(OUT[call] == 0.0)) return;
+    const int2* LH = GLH_all + (size_t)call * ne;
+    const float* DB = GDB_all + (size_t)call * nc;
+    int4* RUN = GRUN_all + (size_t)call * ne;
+    int R = gp_runs(ne, LH, GH, RUN, lane);
+    double v = 0.0;
+    if (gp_use_span(RUN, R, lane)) {
+        for (int k = 0; k < R; ++k) {
+            int4 ru = RUN[k];
+            v += gp_spand(ru.x, ru.y, ru.z, ne, lane, LH, DB, GSTEP, GT, GKIE, GW, GM, C);
+        }
+    } else {
+        for (int k = lane; k < R; k += 32) {
+            int4 ru = RUN[k];
+            v += gp_rund(ru.x, ru.y, ru.z, ne, LH, DB, GSTEP, GT, GKIE, GW);
+        }
+#pragma unroll
+        for (int o = 16; o > 0; o >>= 1) v += __shfl_down_sync(0xffffffffu, v, o);
+    }
+    if (lane == 0) OUT[call] = -0.5 * (c0 + v) - ld;
 }
 #endif
 #endif

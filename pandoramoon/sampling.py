@@ -323,18 +323,18 @@ def _loglike(u, D):
 @njit(cache=True)
 def _loglike_gp(u, D):
     """_loglike with the simultaneous GP (Likelihood(gp=...)): D has the GP tables appended (24-31: F, K, irs, e,
-    W, v, c0, ld of pandoramoon.gp.gp_setup)"""
+    W, v, H, c0, ld of pandoramoon.gp.GP.setup)"""
     th, lw = _theta(u, D)
     if not lw > LOGZERO:
         return LOGZERO
     if D[9] == 0:
         return lw + pandora_loglike_planet_gp(th[0], th[1], th[2], th[3], th[4], th[5], th[6], th[7], th[8], th[9],
                                               th[10], th[11], D[0], D[1], D[2], D[3], D[4], D[24], D[25], D[26],
-                                              D[27], D[28], D[29], D[30], D[31], None, D[8])
+                                              D[27], D[28], D[29], D[30], D[31], D[32], None, D[8])
     return lw + pandora_loglike_gp(th[0], th[1], th[2], th[3], th[4], th[5], th[6], th[7], th[8], th[9], th[10],
                                    th[11], th[12], th[13], th[14], th[15], th[16], th[17], th[18], th[19], D[0], D[1],
-                                   D[2], D[3], D[4], D[24], D[25], D[26], D[27], D[28], D[29], D[30], D[31], None,
-                                   D[8])
+                                   D[2], D[3], D[4], D[24], D[25], D[26], D[27], D[28], D[29], D[30], D[31], D[32],
+                                   None, D[8])
 
 
 @njit(cache=True)
@@ -544,7 +544,7 @@ class _Model:
         self.ll = _loglike
         if getattr(like, "gp", None) is not None:
             g = like.gp_tables
-            self.D = self.D + (g[0], g[1], g[2], g[3], g[4], g[5], float(g[6]), float(g[7]))
+            self.D = self.D + (g[0], g[1], g[2], g[3], g[4], g[5], g[6], float(g[7]), float(g[8]))
             self.ll = _loglike_gp
 
     @staticmethod
@@ -1262,7 +1262,7 @@ class NestedSampler:
             U = np.ascontiguousarray(np.asarray(ws["upoints"])[ti])
             m = self.models[mname]
             tb = like_of(g).gp_tables
-            D1 = tuple(m.D[:24]) + (tb[0], tb[1], tb[2], tb[3], tb[4], tb[5], float(tb[6]), float(tb[7]))
+            D1 = tuple(m.D[:24]) + (tb[0], tb[1], tb[2], tb[3], tb[4], tb[5], tb[6], float(tb[7]), float(tb[8]))
             lw = np.log(w) + _ll_batch(U, D1) - _ll_batch(U, m.D)
             lz = float(np.logaddexp.reduce(lw))
             q = np.exp(lw - lz)
