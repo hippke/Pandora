@@ -927,6 +927,14 @@ RULE_SETS = {
     "v5": dict(dict.fromkeys(_RULE_FLAGS, False), gap_bias=True, scatter_runs32=True, route_dlnz=True),
     "v7": dict(dict.fromkeys(_RULE_FLAGS, True), ks_hi_only=False),
     "v8": dict.fromkeys(_RULE_FLAGS, True),
+    # experimental (GPU_LOG Round 9): when may an nsteps request pass the multimodal block (no nsteps escalation once
+    # n_live was escalated)? "cap": once n_live is at max_nlive (the alternative is the "stalled" stop); "cap_dlnz":
+    # at the cap and the arms' mean lnZ differ by > route_dlnz_sig sigma; "dlnz": that difference at any n_live
+    "u1": dict(dict.fromkeys(_RULE_FLAGS, True), unblock="cap"),
+    "u2": dict(dict.fromkeys(_RULE_FLAGS, True), unblock="cap_dlnz"),
+    "u3": dict(dict.fromkeys(_RULE_FLAGS, True), unblock="dlnz"),
+    "u3r23": dict(dict.fromkeys(_RULE_FLAGS, False), unblock="dlnz"),     # stress test: r23 (frequent n_live x 2)
+    "u1r23": dict(dict.fromkeys(_RULE_FLAGS, False), unblock="cap"),
 }
 
 
@@ -1315,7 +1323,19 @@ def fit(ll_u, ndim, wrapped=None, nlive=2000, nsteps=None, threads=12, min_runs=
         if esc_nlive:
             multimodal[0] = True
         blocked = False
-        if multimodal[0] and esc_nsteps:
+        ub = RS.get("unblock")
+        if multimodal[0] and esc_nsteps and ub:
+            at_cap = nlive >= max_nlive
+            strong = bool(check and sC is not None and sC["M"] >= gate and np.isfinite(d) and np.isfinite(sig)
+                          and abs(d) > FR["route_dlnz_sig"] * sig)
+            if (ub == "cap" and at_cap) or (ub == "cap_dlnz" and at_cap and strong) or (ub == "dlnz" and strong):
+                multimodal_ok = True
+                why += " (multimodal, nsteps allowed: " + ("n_live at its cap" if at_cap else "arms differ") + ")"
+            else:
+                multimodal_ok = False
+        else:
+            multimodal_ok = False
+        if multimodal[0] and esc_nsteps and not multimodal_ok:
             # once runs disagree like runs that miss modes, the comparison of the arms only shows which arm got the
             # lucky runs (Kepler artefact fits escalated nsteps to 1024 on that): no nsteps escalation any more.
             # Rule 3's excess scatter goes to n_live instead (Round 23: n_live lowers the chain-length bias about like
