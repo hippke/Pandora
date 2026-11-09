@@ -124,6 +124,16 @@ class GP(object):
         g.fit_nll, g.fit_nfev, g.fit_points = float(best[1]), int(nfev[0]), int(len(t))
         return g
 
+    def sample(self, time, rng=None):
+        """a random draw of the GP (the correlated part only, without the white noise) at the ascending times, e.g.
+        to simulate stellar variability or for injection tests (exact state-space simulation)"""
+        rng = np.random.default_rng(rng)
+        t = np.asarray(time, dtype=np.float64)
+        if len(t) > 1 and not np.all(np.diff(t) >= 0):
+            raise ValueError("GP.sample needs ascending times")
+        z = rng.standard_normal((len(t), 2))
+        return _sho_sample(t, self.amp, self.tau, z)
+
     def predict(self, time, residual, yerr, mask=None):
         """posterior mean and sd of the GP at the given (ascending) times, given residual = data - model there
         (Kalman filter + Rauch-Tung-Striebel smoother; mask True = left out): the trend to subtract for plots"""
@@ -359,6 +369,30 @@ def _nll_grad(idx, steps, y1, var, yerr, amp, tau):
         p01 -= k1 * p00
         p00 -= k0 * p00
     return nll, grad
+
+
+@jit(cache=True, nopython=True)
+def _sho_sample(t, amp, tau, z):
+    """GP.sample: the SHO state propagated with its exact transition and process noise (z: standard normals)"""
+    n = t.shape[0]
+    out = np.empty(n)
+    s2 = amp * amp
+    lam = 1.0 / (tau * 1.4142135623730951)
+    x0 = amp * z[0, 0]
+    x1 = amp * z[0, 1]
+    out[0] = x0
+    for i in range(1, n):
+        f00, f01, f10, f11, q00, q01, q11 = _sho_step(lam * (t[i] - t[i - 1]), s2)
+        y0 = f00 * x0 + f01 * x1
+        y1 = f10 * x0 + f11 * x1
+        # Cholesky factor of the process noise (q00 > 0 for a positive step)
+        l00 = math.sqrt(max(q00, 0.0))
+        l10 = q01 / l00 if l00 > 0 else 0.0
+        l11 = math.sqrt(max(q11 - l10 * l10, 0.0))
+        x0 = y0 + l00 * z[i, 0]
+        x1 = y1 + l10 * z[i, 0] + l11 * z[i, 1]
+        out[i] = x0
+    return out
 
 
 @jit(cache=True, nopython=True)

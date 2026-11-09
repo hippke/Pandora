@@ -112,6 +112,12 @@ def test_fit():
     gf = GP.fit(t, y, 2e-4, bin_width=None)
     ok = abs(gf.amp / 8e-4 - 1) < 0.25 and abs(gf.tau / 0.6 - 1) < 0.35 and abs(gf.err_scale - 1) < 0.1
     check("GP.fit recovers amp, tau, err_scale of an SHO draw", ok, repr(gf))
+    ts = np.arange(0, 2000, 0.02)
+    xs = GP(1e-3, 0.3).sample(ts, 1)
+    acf = [np.mean(xs[:len(xs) - k] * xs[k:]) for k in (0, 5, 15)]
+    ref = sho_k(np.array([0.0, 0.1, 0.3]), 1e-3, 0.3)
+    err = np.max(np.abs(np.array(acf) - ref)) / 1e-6
+    check("GP.sample has the SHO covariance", err < 0.08, f"max |acf - k| / amp^2 {err:.3f}")
 
 
 def test_sampler():

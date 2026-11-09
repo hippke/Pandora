@@ -84,6 +84,18 @@ det = pandora.detect(like, priors)              # dlnz, candidate (dlnz > 3 and 
 results = pandora.NestedSampler(like, priors).run()    # full fit; 30-min data are supersampled automatically
 ```
 
+### On an NVIDIA GPU, and with simultaneous GP detrending
+`NestedSampler(..., device="gpu")` runs the planet+moon fit on an NVIDIA GPU (`pip install pandoramoon[gpu]`; FP32 kernels, validated against the FP64 CPU model). On a consumer RTX 5060 the [GPU tutorial](https://github.com/hippke/Pandora/blob/main/examples/tutorial_characterisation_gpu.ipynb) fit takes 36 s instead of 164 s on all 32 threads of a Ryzen 9 7950X; on real Kepler light curves the likelihood is about 10x faster than on that CPU. Scope: circular planet orbits, moon eccentricity <= 0.9.
+
+`Likelihood(time, flux, flux_err, ..., gp=GP(amp, tau, err_scale))` fits the raw light curve as transit model + Gaussian process + white noise instead of detrending it first (**experimental**). The GP is an SHO kernel with fixed hyperparameters (estimate them with `GP.fit` on the data outside the transits), computed exactly by a Kalman filter on the CPU and the GPU; the planet-only model uses the same GP. The [GP tutorial](https://github.com/hippke/Pandora/blob/main/examples/tutorial_characterisation_GP.ipynb) shows a case where a masked biweight filter produces a false moon and the GP does not.
+
+```
+from pandoramoon.gp import GP
+gp = GP.fit(time, flux, flux_err, mask=in_transit_and_moon_reach)     # hyperparameters, milliseconds
+like = pandora.Likelihood(time, flux, flux_err, epoch_distance=P, gp=gp)   # raw (normalised) flux, not detrended
+results = pandora.NestedSampler(like, priors, device="gpu").run()          # or device="cpu"
+```
+
 ### Fitting: evidence and posterior with the built-in nested sampler
 `NestedSampler` fits a `Likelihood` with priors, compares planet+moon with planet-only (Bayes factor) and checks its own convergence. Parameters are Pandora's (same names and units); give a prior or a fixed number for each. The limb darkening is set as `q1, q2` (Kipping) or `u1, u2` (e.g. `Normal` priors from stellar models, with `ld_correlation`). `w_bary`, `ecc_bary`, `ecc_moon` and `w_moon` default to 0.
 
