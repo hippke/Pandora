@@ -305,6 +305,14 @@ def test_sampler():
     check("unit-cube likelihood = Likelihood(theta) + coordinate weight", ok)
     mp = S.models["planet"]
     check("planet-only model samples the GP likelihood too", mp.ll is _loglike_gp)
+    from pandoramoon.gp import SHO, Rotation
+    ro = [GP(1e-3, 0.5).refit_options()["kernel"], GP(1e-3, 0.5, Q=2.0, baseline="offset", gap=0.5).refit_options(),
+          GP(terms=[SHO(1e-3, 1.0), SHO(1e-4, 0.1)]).refit_options()["kernel"],
+          GP(terms=[Rotation(1e-3, 5.0), SHO(1e-4, 0.1)]).refit_options(),
+          GP(terms=[SHO(1e-3, 1.0, 3.0), SHO(1e-4, 0.1)]).refit_options()]
+    ok = (ro[0] == "sho" and ro[1]["kernel"] == "sho_q" and ro[1]["baseline"] == "offset" and ro[1]["gap"] == 0.5
+          and ro[2] == "sho2" and ro[3]["kernel"] == "rotation" and ro[3]["period"] == 5.0 and ro[4] is None)
+    check("GP.refit_options (gp_profile): the GP.fit kernel of each form, None for a hand-made sum", ok)
 
 
 def test_residual_scatter():

@@ -205,6 +205,19 @@ class GP(object):
         return ("ss", tuple(x.key() for x in self.terms), self.err_scale, self.baseline,
                 self.baseline_sd if self.baseline else None, self.gap)
 
+    def refit_options(self):
+        """GP.fit keyword arguments that refit a GP of this form (kernel, baseline, gap, baseline_sd, the rotation
+        period as the start), or None if no GP.fit kernel has this form (a hand-made sum of terms)"""
+        t = self.terms
+        o = dict(baseline=self.baseline, gap=self.gap, baseline_sd=self.baseline_sd)
+        if len(t) == 1 and isinstance(t[0], SHO):
+            return dict(o, kernel="sho" if t[0].Q == _Q0 else "sho_q")
+        if len(t) == 2 and all(isinstance(x, SHO) and x.Q == _Q0 for x in t):
+            return dict(o, kernel="sho2")
+        if len(t) == 2 and isinstance(t[0], Rotation) and isinstance(t[1], SHO) and t[1].Q == _Q0:
+            return dict(o, kernel="rotation", period=t[0].period)
+        return None
+
     def blocks(self):
         """the state-space blocks as arrays (kind 0 = SHO (amp, tau, Q), 1 = offset (sd), 2 = linear (sd, sd'))"""
         kind, pa, pb, pc = [], [], [], []
