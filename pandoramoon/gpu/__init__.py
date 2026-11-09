@@ -5,4 +5,6 @@ Imported only on request (it needs the `gpu` extra: cuda-core, cuda-bindings, nv
 from pandoramoon.gpu._cuda import available
 from pandoramoon.gpu.likelihood import GPULikelihood
 
-__all__ = ["available", "GPULikelihood"]
+GP_SUPPORTED = True          # Likelihood(gp=...): the GP build of model.cu (gp_pass)
+
+__all__ = ["available", "GPULikelihood", "GP_SUPPORTED"]

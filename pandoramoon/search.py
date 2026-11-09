@@ -126,7 +126,7 @@ def resample_likelihood(like, factor, exposure=None):
     data = np.where(like.inv_err > 0, like.data, np.nan)
     return Likelihood(subexposure_times(like.time, factor, exposure), data, err, epoch_distance=like.epoch_distance,
                       supersampling_factor=factor, occult_small_threshold=like.occult_small_threshold,
-                      hill_sphere_threshold=like.hill_sphere_threshold)
+                      hill_sphere_threshold=like.hill_sphere_threshold, gp=getattr(like, "gp", None))
 
 
 def cadence_times(like):
@@ -235,8 +235,18 @@ def epoch_jackknife(like, params_moon, params_planet, jack_min=JACK_MIN):
     ep = np.round((tc - t0) / params_planet["per_bary"]).astype(int)
     d = like.data
     epochs = np.unique(ep[w > 0])
-    dchi = np.array([float(np.sum(w[ep == e] * ((d[ep == e] - fp[ep == e]) ** 2 - (d[ep == e] - fm[ep == e]) ** 2)))
-                     for e in epochs])
+    if getattr(like, "gp", None) is not None:
+        # simultaneous GP: chi^2 = sum of the squared whitened residuals (Kalman innovations), each cadence's
+        # innovation attributed to its epoch
+        from pandoramoon.gp import whiten_deficit
+        g = like.gp_tables
+        e_ = g[3]
+        wp = e_ + whiten_deficit(np.ascontiguousarray(1.0 - fp), g[0], g[1], g[2])
+        wm = e_ + whiten_deficit(np.ascontiguousarray(1.0 - fm), g[0], g[1], g[2])
+        dchi = np.array([float(np.sum(wp[ep == e] ** 2 - wm[ep == e] ** 2)) for e in epochs])
+    else:
+        dchi = np.array([float(np.sum(w[ep == e] * ((d[ep == e] - fp[ep == e]) ** 2 - (d[ep == e] - fm[ep == e]) ** 2)))
+                         for e in epochs])
     tot = float(dchi.sum()) if len(dchi) else 0.0
     j = int(np.argmax(dchi)) if len(dchi) else -1
     wo = tot - float(dchi[j]) if len(dchi) else 0.0
@@ -292,14 +302,14 @@ def detect(likelihood, priors, recall=0.95, threshold=None, seed=1, jack_min=Non
     w0 = _time.perf_counter()
 
     def run(m, nlive, nsteps, sd):
-        return nss.run(_loglike, m.ndim, wrapped=m.wrapped, nlive=nlive, nsteps=nsteps, seed=sd, dirs="pairs",
+        return nss.run(m.ll, m.ndim, wrapped=m.wrapped, nlive=nlive, nsteps=nsteps, seed=sd, dirs="pairs",
                        kpair=4, data=m.D)
     jobs = [(mp, st["nlive_planet"], st["nsteps_planet"], seed)]
     jobs += [(mm, st["nlive_moon"], st["nsteps_moon"], seed + 7 + 101 * j) for j in range(st["repeats"])]
     nth = max(1, min(len(jobs), int(threads) if threads else (os.cpu_count() or 1)))
     if nth > 1:
         from concurrent.futures import ThreadPoolExecutor
-        nss.make_sampler(_loglike, False, True)      # one sampler for all threads (numba releases the GIL in it)
+        nss.make_sampler(mm.ll, False, True)         # one sampler for all threads (numba releases the GIL in it)
         import gc
         gc.collect()                                  # see nss.fit: no Tk objects may be collected in a worker thread
         with ThreadPoolExecutor(max_workers=nth) as ex:

@@ -456,11 +456,24 @@ __device__ __forceinline__ bool call_setup(const double* __restrict__ th, const 
 
 // kernel 1's cadence loop (lane l: cadences l, l + 32, ...): chi^2 of the cadences without a limb eclipse
 // (Neumaier-compensated), the others queued for limb_fix
+// GP (opt-in build, Likelihood(gp=...); pandoramoon/gp.py): the cadence loops store the deficit of each window cadence
+// in the call's row GDB (and the per-epoch window [lo, hi) in GLH) instead of summing chi^2; gp_pass then filters
+// them. Without GP the kernels are unchanged.
+#ifdef GP
+#ifdef NO_WINDOW
+#error "GP needs the windowed cadence loop"
+#endif
+#define GP_PARAM , float* __restrict__ GDB
+#define GP_ARG , GDB
+#else
+#define GP_PARAM
+#define GP_ARG
+#endif
 template <bool ECC>
 __device__ __forceinline__ void one_cadence(int c, int call, bool valid, const CallP& P, const Data& D,
                                             const Body& Pb, const Body& Mb, const float* __restrict__ IV,
                                             const float* __restrict__ E, int2* __restrict__ Q, int* __restrict__ QN,
-                                            int qcap, float& chi, float& comp, int& nlimb, bool& overflow) {
+                                            int qcap, float& chi, float& comp, int& nlimb, bool& overflow GP_PARAM) {
     bool defer = false;
     float d = cadence_deficit<false, ECC>(c, P, D, Pb, Mb, defer);
     if (defer) {
@@ -472,6 +485,10 @@ __device__ __forceinline__ void one_cadence(int c, int call, bool valid, const C
         }
         return;
     }
+#ifdef GP
+    GDB[c] = d;
+    return;
+#endif
     float r = d - __ldg(&E[c]);
     float t = __ldg(&IV[c]) * r * r;
     float s2 = chi + t;                                   // Neumaier summation
@@ -499,13 +516,18 @@ __device__ __forceinline__ void main_loop(int lane, int nc, int ne, const int* _
 // outside contribute IV E^2 (d = 0 there): chi^2 = PF[nc] - sum_e (PF[hi_e] - PF[lo_e]) + the window terms, PF the
 // FP64 prefix sums of the FP32 terms IV E^2 (likelihood.py). Same set of terms as before; only the out-of-window
 // terms are summed in FP64 from the prefix sums instead of in FP32 per call.
+#ifdef GP
+#define GP_PARAM2 , float* __restrict__ GDB, int2* __restrict__ GLH
+#else
+#define GP_PARAM2
+#endif
 template <bool ECC>
 __device__ __forceinline__ void main_loop(int lane, int nc, int ne, const int* __restrict__ EC,
                                           const double* __restrict__ PF, int call, bool valid, const CallP& P,
                                           const Data& D, const Body& Pb, const Body& Mb, const float* __restrict__ IV,
                                           const float* __restrict__ E, int2* __restrict__ Q, int* __restrict__ QN,
                                           int qcap, float& chi, float& comp, double& flat_in, int& nlimb,
-                                          bool& overflow) {
+                                          bool& overflow GP_PARAM2) {
     const int mid = SS / 2;
     for (int e0 = 0; e0 < ne; e0 += 32) {
         int e = e0 + lane, lo = 0, hi = 0;
@@ -533,6 +555,9 @@ __device__ __forceinline__ void main_loop(int lane, int nc, int ne, const int* _
                 hi = l;
             }
             flat_in += __ldg(&PF[hi]) - __ldg(&PF[lo]);
+#ifdef GP
+            GLH[e] = make_int2(lo, hi);
+#endif
         }
         int cnt = hi - lo, incl = cnt;
 #pragma unroll
@@ -553,7 +578,7 @@ __device__ __forceinline__ void main_loop(int lane, int nc, int ne, const int* _
             int lo_l = __shfl_sync(0xffffffffu, lo, l), ex_l = __shfl_sync(0xffffffffu, excl, l);
             if (j < T)
                 one_cadence<ECC>(lo_l + (j - ex_l), call, valid, P, D, Pb, Mb, IV, E, Q, QN, qcap, chi, comp,
-                                 nlimb, overflow);
+                                 nlimb, overflow GP_ARG);
         }
     }
 }
@@ -571,7 +596,11 @@ loglike(const double* __restrict__ TH, int n,
         const float* __restrict__ LT, const float* __restrict__ IT,
         double* __restrict__ OUT, int* __restrict__ NLIMB, int2* __restrict__ Q, int* __restrict__ QN, int qcap,
         CallP* __restrict__ PCG, float* __restrict__ COEF, const int* __restrict__ ACT,
-        int ne, const int* __restrict__ EC, const double* __restrict__ PF, double pft) {
+        int ne, const int* __restrict__ EC, const double* __restrict__ PF, double pft
+#ifdef GP
+        , float* __restrict__ GDB_all, int2* __restrict__ GLH_all
+#endif
+        ) {
     __shared__ __align__(16) float sh[WARPS][4][ROW];
     int w = threadIdx.x >> 5, lane = threadIdx.x & 31;
     int call = blockIdx.x * WARPS + w;
@@ -594,12 +623,19 @@ loglike(const double* __restrict__ TH, int n,
     double flat_in = 0.0;                          // the flat terms IV E^2 of this lane's window ranges
     int nlimb = 0;
     bool overflow = false;
+#ifdef GP
+    float* GDB = GDB_all + (size_t)call * nc;
+    int2* GLH = GLH_all + (size_t)call * ne;
+#define GP_ARG2 , GDB, GLH
+#else
+#define GP_ARG2
+#endif
     if (ECC_ON && P.e > 0.f)                       // uniform per call (warp): two loops, the circular one lean
         main_loop<true>(lane, nc, ne, EC, PF, call, valid, P, D, Pb, Mb, IV, E, Q, QN, qcap, chi, comp, flat_in,
-                        nlimb, overflow);
+                        nlimb, overflow GP_ARG2);
     else
         main_loop<false>(lane, nc, ne, EC, PF, call, valid, P, D, Pb, Mb, IV, E, Q, QN, qcap, chi, comp, flat_in,
-                         nlimb, overflow);
+                         nlimb, overflow GP_ARG2);
     double v = (double)chi + (double)comp - flat_in;
 #pragma unroll
     for (int off = 16; off > 0; off >>= 1) {
@@ -607,6 +643,10 @@ loglike(const double* __restrict__ TH, int n,
         nlimb += __shfl_down_sync(0xffffffffu, nlimb, off);
     }
     overflow = __any_sync(0xffffffffu, overflow);
+#ifdef GP
+    v = 0.0;                                       // gp_pass computes the likelihood of the valid calls
+    pft = 0.0;
+#endif
     if (lane == 0) {
         double out = valid ? -0.5 * (v + pft) : -__longlong_as_double(0x7ff0000000000000LL);
         OUT[call] = overflow ? __longlong_as_double(0x7ff8000000000000LL) : out;   // NaN: queue overflow
@@ -623,7 +663,11 @@ extern "C" __global__ void limb_fix(const float* __restrict__ DT, const int* __r
                                     const float* __restrict__ IV, const float* __restrict__ E,
                                     double* __restrict__ OUT, const int2* __restrict__ Q, int* __restrict__ QN,
                                     int qcap, const CallP* __restrict__ PCG, const float* __restrict__ COEF,
-                                    unsigned int* __restrict__ DONE) {
+                                    unsigned int* __restrict__ DONE
+#ifdef GP
+                                    , float* __restrict__ GDB_all, int nc
+#endif
+                                    ) {
     int nq = min(*((volatile int*)QN), qcap);
     Data D;
     D.DT = DT; D.EP = EP; D.EDT = EDT; D.EN = EN; D.EHI = EHI; D.ELO = ELO;
@@ -637,8 +681,12 @@ extern "C" __global__ void limb_fix(const float* __restrict__ DT, const int* __r
         bool defer = false;
         float d = (ECC_ON && P.e > 0.f) ? cadence_deficit<true, true>(qc.y, P, D, Pb, Mb, defer)
                             : cadence_deficit<true, false>(qc.y, P, D, Pb, Mb, defer);
+#ifdef GP
+        GDB_all[(size_t)qc.x * nc + qc.y] = d;
+#else
         float r = d - E[qc.y];
         atomicAdd(&OUT[qc.x], -0.5 * (double)(IV[qc.y] * r * r));
+#endif
     }
     __syncthreads();
     if (threadIdx.x == 0) {
@@ -647,6 +695,65 @@ extern "C" __global__ void limb_fix(const float* __restrict__ DT, const int* __r
         if (t == gridDim.x - 1) { *QN = 0; *DONE = 0u; __threadfence(); }
     }
 }
+
+#ifdef GP
+// Kernel 3 (GP build): the simultaneous GP's chi^2 (pandoramoon/gp.py gp_quad), one thread per call: the D-filter
+// over the call's cadences from its first to its last window cadence (the deficit from GDB inside the epoch windows
+// GLH, 0 elsewhere) with the gains, innovation scales and whitened data of gp_setup (FP32 tables), Neumaier-summed,
+// plus the closed-form tail after the last window cadence. OUT = -(c0 + sum) / 2 - ld for the calls that kernel 1
+// left at 0 (valid, no queue overflow).
+extern "C" __global__ void gp_pass(int n, int nc, int ne, const int2* __restrict__ GLH_all,
+                                   const float* __restrict__ GDB_all, const float4* __restrict__ GF,
+                                   const float2* __restrict__ GK, const float* __restrict__ GIRS,
+                                   const float* __restrict__ GE, const float4* __restrict__ GW,
+                                   double c0, double ld, double* __restrict__ OUT, const int* __restrict__ ACT) {
+    int call = blockIdx.x * blockDim.x + threadIdx.x;
+    if (call >= n) return;
+    if (ACT && !ACT[call]) return;
+    if (!(OUT[call] == 0.0)) return;               // invalid (-inf) or queue overflow (NaN): as kernel 1 set it
+    const int2* LH = GLH_all + (size_t)call * ne;
+    const float* DB = GDB_all + (size_t)call * nc;
+    int first = -1, last = -1;
+    for (int e = 0; e < ne; ++e) {
+        int2 r = LH[e];
+        if (r.y > r.x) {
+            if (first < 0) first = r.x;
+            last = r.y - 1;
+        }
+    }
+    double out = -0.5 * c0 - ld;
+    if (first >= 0) {
+        float m0 = 0.f, m1 = 0.f, acc = 0.f, comp = 0.f;
+        int e = 0;
+        int2 r = LH[0];
+        for (int c = first; c <= last; ++c) {
+            if (c > first) {
+                float4 f = __ldg(&GF[c]);
+                float n0 = f.x * m0 + f.y * m1;
+                m1 = f.z * m0 + f.w * m1;
+                m0 = n0;
+            }
+            while (c >= r.y && e + 1 < ne) r = LH[++e];
+            float d = (c >= r.x && c < r.y) ? DB[c] : 0.f;
+            float inn = d - m0;
+            float dw = inn * __ldg(&GIRS[c]);
+            float t = dw * (dw + 2.f * __ldg(&GE[c]));
+            float s2 = acc + t;
+            comp += (fabsf(acc) >= fabsf(t)) ? (acc - s2) + t : (t - s2) + acc;
+            acc = s2;
+            float2 k = __ldg(&GK[c]);
+            m0 += k.x * inn;
+            m1 += k.y * inn;
+        }
+        float4 w = __ldg(&GW[2 * last]);           // (W00, W01, W11, 0), (v0, v1, 0, 0)
+        float4 vv = __ldg(&GW[2 * last + 1]);
+        double tail = (double)w.x * m0 * m0 + 2.0 * (double)w.y * m0 * m1 + (double)w.z * m1 * m1
+                      + 2.0 * ((double)vv.x * m0 + (double)vv.y * m1);
+        out = -0.5 * (c0 + (double)acc + (double)comp + tail) - ld;
+    }
+    OUT[call] = out;
+}
+#endif
 
 // ------------------------------------------------------------------------------------------- prior transform
 // sampling._theta on the device, FP64, one thread per point (GPU_MODEL.md section 6a): unit cube U (n, ndim) ->

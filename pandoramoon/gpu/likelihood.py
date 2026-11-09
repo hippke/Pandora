@@ -78,11 +78,32 @@ class GPULikelihood:
         self.d.update(EC=cuda.to_device(ec), PF=cuda.to_device(pf))
         # eccentric=False: compiled without the eccentric-moon loop (about 5 % faster); ecc_moon must then be 0
         self.eccentric = bool(eccentric)
+        # simultaneous GP (Likelihood(gp=...), opt-in): the GP build of model.cu (deficits per cadence, then gp_pass
+        # with the FP32 tables of pandoramoon.gp.gp_setup)
+        self.gp = getattr(like, "gp", None) is not None
+        if self.gp:
+            if not self.windows:
+                raise ValueError("GPULikelihood: the GP needs the windowed cadence loop (no NO_WINDOW)")
+            F, K, irs, e, W, v, c0, ld = like.gp_tables
+            if len(irs) != nc:
+                raise ValueError("GPULikelihood: GP tables do not match the cadences")
+            gw = np.zeros((nc, 2, 4), np.float32)
+            gw[:, 0, :3] = W
+            gw[:, 1, :2] = v
+            self.d.update(GF=cuda.to_device(np.ascontiguousarray(F, dtype=np.float32)),
+                          GK=cuda.to_device(np.ascontiguousarray(K, dtype=np.float32)),
+                          GIRS=cuda.to_device(np.ascontiguousarray(irs, dtype=np.float32)),
+                          GE=cuda.to_device(np.ascontiguousarray(e, dtype=np.float32)),
+                          GW=cuda.to_device(gw.reshape(nc * 2, 4)))
+            self.gp_c0, self.gp_ld = float(c0), float(ld)
+            self._gdb = self._glh = None
+            extra = tuple(extra) + (("GP", "1"),)
         self.mod = _cuda.module(ss, warps, minb, tuple(extra) + (() if self.eccentric else (("NO_ECC", "1"),)))
         a = self.mod.get_kernel("loglike").attributes
         self.regs, self.local_bytes = a.num_regs, a.local_size_bytes
         self.kernel = self.mod.get_kernel("loglike")
         self.kernel_fix = self.mod.get_kernel("limb_fix")
+        self.kernel_gp = self.mod.get_kernel("gp_pass") if self.gp else None
         self.fix_blocks = 4 * cuda.get_current_device().MULTIPROCESSOR_COUNT
         self._q = None             # limb-eclipse queue (capacity qpercall() x the largest batch so far)
         self._pc = self._co = None  # per-call setup and coefficients for limb_fix
@@ -123,6 +144,13 @@ class GPULikelihood:
             self._co = cuda.device_array((n, 4, 36), np.float32)     # coefficient rows per call
         qcap = np.int32(self._q.shape[0])
         grid = (n + self.warps - 1) // self.warps
+        gpa = ()
+        if self.gp:
+            ne = len(self.te)
+            if self._gdb is None or self._gdb.shape[0] < n:
+                self._gdb = cuda.device_array((n, self.nc), np.float32)
+                self._glh = cuda.device_array((n, ne, 2), np.int32)
+            gpa = (_cuda.ptr(self._gdb), _cuda.ptr(self._glh))
         if main:
             _cuda.launch(self.kernel, grid, 32 * self.warps,
                          _cuda.ptr(dTH), np.int32(n),
@@ -133,14 +161,20 @@ class GPULikelihood:
                          _cuda.ptr(self.LT), _cuda.ptr(self.IT), _cuda.ptr(dOUT), _cuda.ptr(dNLIMB),
                          _cuda.ptr(self._q), _cuda.ptr(self.dQN), qcap, _cuda.ptr(self._pc), _cuda.ptr(self._co),
                          _cuda.ptr(dACT), np.int32(len(self.te)), _cuda.ptr(d["EC"]), _cuda.ptr(d["PF"]),
-                         np.float64(self.pft))
+                         np.float64(self.pft), *gpa)
         if not fix:
             return
         _cuda.launch(self.kernel_fix, self.fix_blocks, 128,
                      _cuda.ptr(d["DT"]), _cuda.ptr(d["EP"]), _cuda.ptr(d["EDT"]), _cuda.ptr(d["EN"]),
                      _cuda.ptr(d["EHI"]), _cuda.ptr(d["ELO"]), _cuda.ptr(d["IV"]), _cuda.ptr(d["LN"]),
                      _cuda.ptr(dOUT), _cuda.ptr(self._q), _cuda.ptr(self.dQN), qcap, _cuda.ptr(self._pc),
-                     _cuda.ptr(self._co), _cuda.ptr(self.dDONE))
+                     _cuda.ptr(self._co), _cuda.ptr(self.dDONE),
+                     *((gpa[0], np.int32(self.nc)) if self.gp else ()))
+        if self.gp:
+            _cuda.launch(self.kernel_gp, (n + 127) // 128, 128, np.int32(n), np.int32(self.nc), np.int32(len(self.te)),
+                         gpa[1], gpa[0], _cuda.ptr(d["GF"]), _cuda.ptr(d["GK"]), _cuda.ptr(d["GIRS"]),
+                         _cuda.ptr(d["GE"]), _cuda.ptr(d["GW"]), np.float64(self.gp_c0), np.float64(self.gp_ld),
+                         _cuda.ptr(dOUT), _cuda.ptr(dACT))
 
     def __call__(self, theta, check=True, return_nlimb=False):
         from numba import cuda
