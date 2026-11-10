@@ -283,6 +283,57 @@ def test_outliers():
           f"{gf}, {int(gf.outliers.sum())} flagged")
 
 
+def test_steps():
+    """GP breaks (a free offset at given times), find_steps, and the single-cadence clip (GPU_LOG Round 9.6):
+    a break = two independent segments; an injected flux step is found, none in pure GP noise, a moon-like dip
+    (10 h, sharp ingress and egress) is not turned into steps; an isolated low cadence inside the transit mask is
+    clipped, the transit is not"""
+    rng = np.random.default_rng(31)
+    t = np.arange(0, 20, 1 / 48)
+    g = GP(1e-4, 0.14, baseline="offset", gap=0.5)
+    e = np.full(len(t), 1e-4)
+    y0 = 1 + g.sample(t, rng) + rng.normal(0, 1e-4, len(t))
+    b = 12.31
+    gb = GP(1e-4, 0.14, baseline="offset", gap=0.5, breaks=[b])
+    lo, hi = t < b, t >= b
+    split = g.loglike_noise(t[lo], y0[lo], e[lo]) + g.loglike_noise(t[hi], y0[hi], e[hi])
+    check("GP(breaks=[b]) = the two segments separately", abs(gb.loglike_noise(t, y0, e) - split) < 1e-8,
+          f"{gb.loglike_noise(t, y0, e):.9f} vs {split:.9f}")
+    check("GP(breaks): repr / key / refit_options carry the breaks", "breaks=[12.31]" in repr(gb)
+          and gb.key() != g.key() and np.allclose(gb.refit_options()["breaks"], [b]))
+    tm = np.abs(t - 10) < 0.15 + 1 / 48                 # the planet's transit (left out of the step search)
+    y = y0.copy()
+    y[np.abs(t - 10) < 0.15] -= 3e-3
+    ys = y.copy()
+    ys[t >= b] -= 7e-4                                   # a flux step of -700 ppm, 2.3 d after mid-transit
+    st = g.find_steps(t, ys, e, mask=tm, min_sep=1.0)
+    check("find_steps: the injected step found (within one cadence)", len(st) == 1 and abs(st[0] - b) < 1 / 48,
+          f"{st}")
+    none = [len(GP(1e-4, 0.14, baseline="offset", gap=0.5).find_steps(
+        t, 1 + GP(1e-4, 0.14).sample(t, np.random.default_rng(40 + k)) + np.random.default_rng(50 + k).normal(
+            0, 1e-4, len(t)), e, mask=tm, min_sep=1.0)) for k in range(5)]
+    check("find_steps: no step in pure GP noise (5 draws)", sum(none) == 0, f"{none}")
+    yd = y.copy()
+    yd[(t > 10.5) & (t < 10.5 + 10 / 24)] -= 4e-4      # a moon-like dip: 400 ppm (4 sigma per cadence), 10 h
+    sd = g.find_steps(t, yd, e, mask=tm, min_sep=1.0)
+    check("find_steps: a 10-h moon-like dip (400 ppm) is not taken for steps (min_sep 1 d)", len(sd) == 0, f"{sd}")
+    gf = GP.fit(t, ys, e, mask=np.abs(t - 10) < 0.45, baseline="offset", gap=0.5, clip=True,
+                steps=dict(mask=tm, min_sep=1.0))
+    check("GP.fit(steps=...): refit with the step as a break", len(gf.steps) == 1 and len(gf.breaks) == 1,
+          f"{gf}")
+    yc = y.copy()
+    k = int(np.argmin(np.abs(t - 10.3)))                 # inside the mask (moon zone), outside the transit
+    yc[k] -= 8e-4
+    gc = GP.fit(t, yc, e, mask=np.abs(t - 10) < 0.45, baseline="offset", gap=0.5, clip=True)
+    check("GP.fit(clip=True): an isolated low cadence inside the mask clipped, no transit cadence",
+          bool(gc.outliers[k]) and not np.any(gc.outliers & (np.abs(t - 10) < 0.15)),
+          f"{int(gc.outliers.sum())} clipped")
+    yd2 = yd.copy()
+    gd = GP.fit(t, yd2, e, mask=np.abs(t - 10) < 0.45, baseline="offset", gap=0.5, clip=True)
+    check("GP.fit(clip=True): no cadence of the 10-h moon-like dip clipped",
+          not np.any(gd.outliers & (t > 10.5) & (t < 10.5 + 10 / 24)), f"{int(gd.outliers.sum())} clipped")
+
+
 def test_white_limit():
     rng = np.random.default_rng(4)
     tc, time_, data, yerr, C = dataset(1, rng)
@@ -476,6 +527,7 @@ if __name__ == "__main__":
     test_fit()
     test_fit_general()
     test_outliers()
+    test_steps()
     test_residual_scatter()
     test_sampler()
     if "--gpu" in sys.argv:

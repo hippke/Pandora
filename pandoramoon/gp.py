@@ -150,10 +150,12 @@ class GP(object):
         default, the Bayes factor does not depend on it as long as it is wide)
     :param gap: None (one segment) or a time in days: a gap longer than this starts a new, independent segment (the
         GP and the baseline restart; e.g. Kepler quarters, or the data windows around each transit)
+    :param breaks: times [d] that also start a new segment (a free offset there, marginalised like the others):
+        flux steps, e.g. Kepler sudden pixel sensitivity dropouts (find_steps, GP.fit(steps=...)); needs a baseline
     """
 
     def __init__(self, amp=None, tau=None, err_scale=1.0, Q=None, terms=None, baseline=None, gap=None,
-                 baseline_sd=(0.01, 0.01)):
+                 baseline_sd=(0.01, 0.01), breaks=None):
         if terms is None:
             if amp is None or tau is None:
                 raise ValueError("GP: give amp and tau (one SHO term) or terms")
@@ -170,6 +172,9 @@ class GP(object):
             raise ValueError(f"GP: baseline must be one of {_BASELINES}, got {baseline!r}")
         self.baseline = baseline
         self.gap = None if gap is None else _pos("GP gap", gap)
+        self.breaks = np.unique(np.asarray([] if breaks is None else breaks, dtype=np.float64).ravel())
+        if len(self.breaks) and baseline is None:
+            raise ValueError("GP: breaks need a baseline (\"offset\" or \"linear\")")
         sd = tuple(float(x) for x in np.broadcast_to(np.asarray(baseline_sd, dtype=np.float64), (2,)))
         self.baseline_sd = (_pos("baseline_sd", sd[0]), _pos("baseline_sd", sd[1]))
         self.sho = [s for x in terms for s in x.sho_terms()]
@@ -185,7 +190,7 @@ class GP(object):
     def is_simple(self):
         """one SHO term of Q = 1/sqrt(2), no baseline, one segment: the original model (its own compiled path)"""
         return (len(self.terms) == 1 and isinstance(self.terms[0], SHO) and self.terms[0].Q == _Q0
-                and self.baseline is None and self.gap is None)
+                and self.baseline is None and self.gap is None and not len(self.breaks))
 
     def __repr__(self):
         if self.is_simple():
@@ -199,6 +204,8 @@ class GP(object):
             s += f", baseline={self.baseline!r}"
         if self.gap is not None:
             s += f", gap={self.gap:.6g}"
+        if len(self.breaks):
+            s += ", breaks=[" + ", ".join(f"{b:.10g}" for b in self.breaks) + "]"
         return f"GP({s})"
 
     def key(self):
@@ -206,13 +213,16 @@ class GP(object):
         if self.is_simple():
             return ("sho", self.amp, self.tau, self.err_scale)
         return ("ss", tuple(x.key() for x in self.terms), self.err_scale, self.baseline,
-                self.baseline_sd if self.baseline else None, self.gap)
+                self.baseline_sd if self.baseline else None, self.gap) + \
+            ((tuple(float(b) for b in self.breaks),) if len(self.breaks) else ())
 
     def refit_options(self):
         """GP.fit keyword arguments that refit a GP of this form (kernel, baseline, gap, baseline_sd, the rotation
         period as the start), or None if no GP.fit kernel has this form (a hand-made sum of terms)"""
         t = self.terms
         o = dict(baseline=self.baseline, gap=self.gap, baseline_sd=self.baseline_sd)
+        if len(self.breaks):
+            o["breaks"] = self.breaks.copy()
         if len(t) == 1 and isinstance(t[0], SHO):
             return dict(o, kernel="sho" if t[0].Q == _Q0 else "sho_q")
         if len(t) == 2 and all(isinstance(x, SHO) and x.Q == _Q0 for x in t):
@@ -234,13 +244,17 @@ class GP(object):
                 np.array(pc, dtype=np.float64))
 
     def segment_starts(self, time):
-        """True at the first cadence of each segment (the first cadence, and after every gap longer than gap)"""
+        """True at the first cadence of each segment (the first cadence, after every gap longer than gap, and the
+        first cadence at or after each break)"""
         t = np.asarray(time, dtype=np.float64)
         seg = np.zeros(len(t), dtype=np.bool_)
         if len(t):
             seg[0] = True
         if self.gap is not None and len(t) > 1:
             seg[1:] = np.diff(t) > self.gap
+        if len(self.breaks) and len(t) > 1:
+            i = np.searchsorted(t, self.breaks, side="left")
+            seg[i[(i > 0) & (i < len(t))]] = True
         return seg
 
     def setup(self, t, y1, valid, yerr):
@@ -264,7 +278,8 @@ class GP(object):
 
     @classmethod
     def fit(cls, time, flux, yerr, mask=None, err_scale=None, amp_bounds=None, tau_bounds=None, bin_width=10.0 / 1440,
-            n_starts=3, kernel="sho", baseline=None, gap=None, baseline_sd=(0.01, 0.01), period=None, clip=None):
+            n_starts=3, kernel="sho", baseline=None, gap=None, baseline_sd=(0.01, 0.01), period=None, clip=None,
+            breaks=None, steps=None):
         """Maximum-likelihood (type II) hyperparameters of the GP alone on the light curve (model flux 1), e.g. with
         the transit windows masked (mask True = left out). err_scale: a number to hold it fixed, or None to fit it
         (bounds 1/3 - 3). Bounds (defaults): amp from 0.02 to 50 x the median yerr, tau from the median time step to
@@ -275,9 +290,14 @@ class GP(object):
         "sho2" (two SHO terms of Q = 1/sqrt(2): e.g. a slow trend plus granulation), "rotation" (Rotation + one SHO
         term for granulation; period: a starting rotation period [d], or None: the three highest peaks of a
         Lomb-Scargle periodogram of the data). baseline, gap, baseline_sd: as in GP (held, not fitted).
-        clip: None, or (upper, lower) [sigma] (True: (4, 5)): iterate the fit with flag_outliers (flares above
-        upper sigma everywhere, outliers below lower sigma outside mask) masked; the flagged points are returned as
-        the GP's outliers (a boolean array over the input points; set those fluxes to NaN for the Likelihood).
+        clip: None, or (upper, lower[, single]) [sigma] (True: (4, 5, True)): iterate the fit with flag_outliers
+        (flares above upper sigma everywhere, outliers below lower sigma outside mask, and with single: isolated
+        single-cadence points below lower sigma also inside mask) masked; the flagged points are returned as the GP's
+        outliers (a boolean array over the input points; set those fluxes to NaN for the Likelihood).
+        breaks: segment starts with a free offset (see GP; needs a baseline). steps: None, or True / a dict of
+        find_steps options (mask: where not to search, default `mask`; min_dlnl, min_sep, ...): after the fit (and
+        clipping), find flux steps under the fitted GP, then refit with a break at each; the GP's `steps` lists them
+        (GPU_LOG Round 9.6: a Kepler flux step next to a transit made a false moon candidate).
 
         "sho" without baseline and gap: as TLS 2.2's gradient fit of its baselines: the exact gradient of the Kalman
         likelihood (forward mode in (ln amp, ln tau, ln err_scale)), a bounded quasi-Newton (projected BFGS,
@@ -288,15 +308,34 @@ class GP(object):
             raise ValueError(f"GP.fit: kernel must be one of {KERNELS}, got {kernel!r}")
         opts = dict(err_scale=err_scale, amp_bounds=amp_bounds, tau_bounds=tau_bounds, bin_width=bin_width,
                     n_starts=n_starts, kernel=kernel, baseline=baseline, gap=gap, baseline_sd=baseline_sd,
-                    period=period)
+                    period=period, breaks=breaks)
+        if steps:
+            if baseline is None:
+                raise ValueError("GP.fit(steps=...) needs a baseline (\"offset\" or \"linear\")")
+            so = dict(steps) if isinstance(steps, dict) else {}
+            smask = so.pop("mask", mask)
+            g = cls.fit(time, flux, yerr, mask=mask, clip=clip, **opts)
+            out = getattr(g, "outliers", np.zeros(len(np.asarray(time)), dtype=bool))
+            f2 = np.where(out, np.nan, np.asarray(flux, dtype=np.float64))
+            st = g.find_steps(time, f2, yerr, mask=smask, **so)
+            if len(st):
+                opts["breaks"] = np.concatenate([np.asarray([] if breaks is None else breaks, float), st])
+                g = cls.fit(time, flux, yerr, mask=mask, clip=clip, **opts)
+            g.steps = np.asarray(st, dtype=np.float64)
+            return g
         if clip is None or clip is False:
             return cls._fit(time, flux, yerr, mask, **opts)
-        upper, lower = (4.0, 5.0) if clip is True else (float(clip[0]), float(clip[1]))
+        if clip is True:
+            upper, lower, single = 4.0, 5.0, True
+        else:
+            upper, lower = float(clip[0]), float(clip[1])
+            single = bool(clip[2]) if len(clip) > 2 else True
         m0 = np.zeros(len(np.asarray(time)), dtype=bool) if mask is None else np.asarray(mask, dtype=bool)
         out = np.zeros_like(m0)
         for _ in range(5):
             g = cls._fit(time, flux, yerr, m0 | out, **opts)
-            new = out | g.flag_outliers(time, flux, yerr, mask=m0 | out, upper=upper, lower=lower, inside=m0)
+            new = out | g.flag_outliers(time, flux, yerr, mask=m0 | out, upper=upper, lower=lower, inside=m0,
+                                        single=single)
             if np.array_equal(new, out):
                 break
             out = new
@@ -305,7 +344,7 @@ class GP(object):
 
     @classmethod
     def _fit(cls, time, flux, yerr, mask, err_scale, amp_bounds, tau_bounds, bin_width, n_starts, kernel, baseline,
-             gap, baseline_sd, period):
+             gap, baseline_sd, period, breaks=None):
         t, y1, yerr_, valid = _prepare(time, flux, yerr, mask)
         t, y1, yerr_ = t[valid], y1[valid], yerr_[valid]
         if len(t) < 10:
@@ -323,6 +362,8 @@ class GP(object):
         s_fix = 1.0 if fit_s else float(err_scale)
         rms = float(np.std(y1))
         a0 = math.log(min(max(math.sqrt(max(rms * rms - ye * ye, (0.1 * ye) ** 2)), alo * 1.01), ahi / 1.01))
+        if breaks is not None and len(breaks) and baseline is None:
+            raise ValueError("GP.fit: breaks need a baseline")
         if kernel == "sho" and baseline is None and gap is None:
             idx, steps = time_table(t, 1e-6)
             lo = np.array([math.log(alo), math.log(tlo)] + ([math.log(1.0 / 3.0)] if fit_s else []))
@@ -347,7 +388,7 @@ class GP(object):
             g.fit_nll, g.fit_nfev, g.fit_points = float(best[1]), int(nfev[0]), int(len(t))
             return g
         return _fit_general(cls, t, y1, yerr_, var0, kernel, fit_s, s_fix, baseline, gap, baseline_sd, n_starts,
-                            period, a0, (alo, ahi), (tlo, thi), dt_med, span)
+                            period, a0, (alo, ahi), (tlo, thi), dt_med, span, breaks)
 
     def sample(self, time, rng=None):
         """a random draw of the GP (the correlated part only: the SHO terms, without the baseline and the white
@@ -379,7 +420,8 @@ class GP(object):
             mean, var = _rts_ss(t, r, var_w, valid, kind, pa, pb, pc, self.segment_starts(t))
         return mean, np.sqrt(np.maximum(var, 0.0))
 
-    def flag_outliers(self, time, flux, yerr, mask=None, upper=4.0, lower=5.0, inside=None, max_iter=100, sep=3):
+    def flag_outliers(self, time, flux, yerr, mask=None, upper=4.0, lower=5.0, inside=None, max_iter=100, sep=3,
+                      single=False, iso=2.0):
         """Flares and outliers under this GP: points whose leave-one-out residual (the residual from the GP's
         prediction given all other points; (r - mean) / sqrt(s^2 yerr^2 - var) for a point in the fit, the exact LOO
         identity of the smoother) is above upper sigma (flares: everywhere, also inside the transit windows: above
@@ -388,7 +430,10 @@ class GP(object):
         largest within sep cadences (the neighbours of a flare's peak look low while the peak pulls the prediction
         up), leaves them out of the prediction, and repeats until no point is added (flares of many cadences).
         mask: points left out of the prediction from the start (e.g. the transit windows); inside: where only the
-        upper test applies (default: mask). Returns a boolean array (True = flagged)."""
+        upper test applies (default: mask). single: inside too, flag isolated single cadences more than lower sigma
+        (white noise) below the mean of their two neighbours (within 1.5 median time steps), the neighbours within
+        iso sigma of each other: a transit or a moon dip lasts many cadences, a one-cadence dip is an artefact
+        (GPU_LOG Round 9.6). Returns a boolean array (True = flagged)."""
         t, y1, yerr_, ok = _prepare(time, flux, yerr, None)
         n = len(t)
         m0 = np.zeros(n, dtype=bool) if mask is None else np.asarray(mask, dtype=bool)
@@ -410,7 +455,80 @@ class GP(object):
                 peak[k:] = np.maximum(peak[k:], a[:-k])
                 peak[:-k] = np.maximum(peak[:-k], a[k:])
             out = out | (cand & (a >= peak))
+        if single and n > 2:
+            # inside: a local test (the GP prediction is an extrapolation there): the cadence below the mean of its
+            # two neighbours by > lower sigma (white noise), and the neighbours at the same level (< iso sigma
+            # apart: not an ingress / egress corner)
+            sw = np.sqrt(var_w)
+            lim = 1.5 * float(np.median(np.diff(t)))
+            nb = np.zeros(n, dtype=bool)
+            nb[1:-1] = ok[:-2] & ok[2:] & (t[1:-1] - t[:-2] <= lim) & (t[2:] - t[1:-1] <= lim)
+            d = np.zeros(n)
+            sep2 = np.full(n, np.inf)
+            d[1:-1] = (y1[1:-1] - 0.5 * (y1[:-2] + y1[2:])) / (sw[1:-1] * math.sqrt(1.5))
+            sep2[1:-1] = np.abs(y1[:-2] - y1[2:]) / (sw[1:-1] * math.sqrt(2.0))
+            out = out | (ok & ins & nb & (d < -lower) & (sep2 < iso))
         return out
+
+
+    def find_steps(self, time, flux, yerr, mask=None, min_dlnl=10.0, min_sep=0.5, max_steps=20, w=6, z_pre=4.0,
+                   n_cand=40):
+        """Flux steps (sudden level changes, e.g. Kepler sudden pixel sensitivity dropouts) under this GP: break times
+        [d] where a free offset raises the GP's marginal likelihood (loglike_noise, the offsets marginalised with
+        their wide prior: the Occam factor of the extra offset is included) by more than min_dlnl.
+        Candidates: boundaries where the mean of the next w points minus the mean of the previous w points (both
+        windows contiguous, within one segment, outside mask) is > z_pre robust sd of that statistic over the light
+        curve (local maxima, at most n_cand). Greedy: the best candidate is added while its gain is > min_dlnl, up to
+        max_steps; candidates within min_sep [d] of an accepted break are dropped, so that two breaks cannot carve
+        out a dip (a moon's dip lasts about a transit duration: give min_sep >= 2 T14 for a moon search).
+        mask: points left out (e.g. the planet's transits; steps inside them cannot be told from the transit).
+        Needs a baseline. Returns the break times (ascending; empty array if none)."""
+        if self.baseline is None:
+            raise ValueError("find_steps needs a GP with a baseline (offset or linear)")
+        t, y1, yerr_, valid = _prepare(time, flux, yerr, mask)
+        idx = np.where(valid)[0]
+        n = len(idx)
+        if n < 4 * w:
+            return np.zeros(0)
+        tv, yv = t[idx], y1[idx]
+        dt_med = float(np.median(np.diff(tv)))
+        seg = self.segment_starts(t)[idx]
+        segid = np.cumsum(seg)
+        c = np.concatenate([[0.0], np.cumsum(yv)])
+        i = np.arange(w, n - w + 1)
+        D = (c[i + w] - c[i]) / w - (c[i] - c[i - w]) / w
+        okw = (tv[np.minimum(i + w - 1, n - 1)] - tv[i - w] <= 1.5 * (2 * w) * dt_med) & \
+            (segid[np.minimum(i + w - 1, n - 1)] == segid[i - w])
+        i, D = i[okw], D[okw]
+        if len(D) < 10:
+            return np.zeros(0)
+        sd = 1.4826 * float(np.median(np.abs(D - np.median(D))))
+        z = np.abs(D) / max(sd, 1e-300)
+        loc = np.ones(len(z), dtype=bool)
+        for k in range(1, w + 1):
+            loc[k:] &= z[k:] >= z[:-k]
+            loc[:-k] &= z[:-k] >= z[k:]
+        pick = np.where(loc & (z > z_pre))[0]
+        pick = pick[np.argsort(-z[pick])][:int(n_cand)]
+        cand = [0.5 * (tv[i[j] - 1] + tv[i[j]]) for j in pick]
+        if not cand:
+            return np.zeros(0)
+        opts = dict(terms=self.terms, err_scale=self.err_scale, baseline=self.baseline, gap=self.gap,
+                    baseline_sd=self.baseline_sd)
+        acc = list(self.breaks)
+        base = type(self)(breaks=acc, **opts).loglike_noise(time, flux, yerr, mask)
+        found = []
+        while cand and len(found) < max_steps:
+            gains = [type(self)(breaks=acc + [b], **opts).loglike_noise(time, flux, yerr, mask) - base for b in cand]
+            j = int(np.argmax(gains))
+            if gains[j] <= min_dlnl:
+                break
+            b = cand[j]
+            acc.append(b)
+            found.append(b)
+            base += gains[j]
+            cand = [x for x in cand if abs(x - b) >= min_sep]
+        return np.sort(np.asarray(found, dtype=np.float64))
 
 
 def _prepare(time, flux, yerr, mask):
@@ -1114,10 +1232,10 @@ def _lomb_scargle_peaks(t, y, pmin, pmax, npk=3):
 
 
 def _fit_general(cls, t, y1, yerr_, var0, kernel, fit_s, s_fix, baseline, gap, baseline_sd, n_starts, period, a0,
-                 ab, tb, dt_med, span):
+                 ab, tb, dt_med, span, breaks=None):
     """GP.fit for the general kernels: ML hyperparameters (log space, bounds) with central-difference gradients
     and _minimize_bounded, from several starts"""
-    seg = cls(1.0, 1.0, gap=gap).segment_starts(t)
+    seg = cls(1.0, 1.0, gap=gap, baseline=baseline, breaks=breaks).segment_starts(t)
     lA = (math.log(ab[0]), math.log(ab[1]))
     lT = (math.log(tb[0]), math.log(tb[1]))
 
@@ -1166,7 +1284,7 @@ def _fit_general(cls, t, y1, yerr_, var0, kernel, fit_s, s_fix, baseline, gap, b
 
     def make(z):
         return cls(terms=build(z), err_scale=math.exp(z[-1]) if fit_s else s_fix, baseline=baseline, gap=gap,
-                   baseline_sd=baseline_sd)
+                   baseline_sd=baseline_sd, breaks=breaks)
 
     def nll(z):
         nfev[0] += 1
