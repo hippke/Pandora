@@ -246,13 +246,15 @@ Interface
       Corner plot of the posterior (needs the ``corner`` package). With a *log_dir*, it is saved as
       ``plots/corner.pdf``. ``model="planet"`` plots the planet-only fit.
 
-   .. method:: gp_profile(max_iter=4, tol=0.02, n_is=20000)
+   .. method:: gp_profile(max_iter=4, tol=0.02, n_is=20000, min_ess=100)
 
       For a finished planet+moon fit with ``Likelihood(gp=...)``: the Bayes factor with the GP's hyperparameters
       refitted for each model (`Fixed hyperparameters and the Bayes factor`_). Called by ``run()`` when
       ``gp_profile=True``; can also be called afterwards. Stores and returns ``results["gp_profile"]`` and sets
       ``results["dlogz_conservative"]``. ``max_iter`` and ``tol`` (in ln of the hyperparameters) limit the
-      planet-only refits, ``n_is`` is the number of posterior samples used for the importance sampling.
+      planet-only refits, ``n_is`` is the number of posterior samples used for the importance sampling. When
+      the importance sampling of the moon model has an effective sample size below ``min_ess``, the moon model
+      is fitted again at its refitted hyperparameters (the fit's ``device`` and ``run()`` settings).
 
 
 Priors
@@ -516,7 +518,8 @@ there.
 
 ``NestedSampler(..., gp_profile=True)`` (or ``sampler.gp_profile()`` after a fit) computes the cheap correction:
 each model at its own h. The moon model's h is refitted on its best fit's residuals and its ln Z there obtained by
-importance sampling of its posterior samples; the planet-only model's h is refitted on its residuals, followed by a
+importance sampling of its posterior samples (if they are too few after reweighting, effective sample size
+< 100, by a planet+moon fit at that h); the planet-only model's h is refitted on its residuals, followed by a
 planet-only fit at that h, repeated until h changes by less than 2 % (1–4 fits, on the CPU). Each model keeps the
 highest ln Z it reached. Cost: seconds to a minute. On the test case: 346.3 with the moon (fixed h: 1406.6;
 marginalised 347.4) and −4.89 without (fixed −4.70, marginalised −4.73). ``results["dlogz_conservative"]`` is the

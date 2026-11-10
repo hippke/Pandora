@@ -1135,6 +1135,7 @@ class NestedSampler:
             accuracy = str(settings()["fit"]["default_accuracy"])
         kw = dict(accuracy=accuracy, threads=self.threads, seed=self.seed)
         kw.update(nss_kw)
+        self._run_kw = dict(nss_kw, accuracy=accuracy)        # gp_profile's moon refit uses the same settings
         out = {}
         order = [n for n in ("planet", "moon") if n in self.models]
 
@@ -1210,7 +1211,7 @@ class NestedSampler:
             self.gp_profile()
         return res
 
-    def gp_profile(self, max_iter=4, tol=0.02, n_is=20000):
+    def gp_profile(self, max_iter=4, tol=0.02, n_is=20000, min_ess=100):
         """The conservative Bayes factor of a fit with a simultaneous GP (Likelihood(gp=...); NestedSampler(...,
         gp_profile=True) calls it after run()). The fit holds the GP hyperparameters h fixed for both models, at
         values usually estimated outside the transits. Given a free GP, the planet-only model can explain part of a
@@ -1220,7 +1221,9 @@ class NestedSampler:
           planet only: h refitted (GP.fit of the same kernel form, all data) on the residuals of its best fit, a
             planet-only fit (CPU) at that h, repeated until h changes by less than tol (in ln h) or max_iter fits;
           planet + moon: h refitted on the residuals of its best fit; ln Z there by importance sampling of the fit's
-            weighted posterior samples (n_is of them; with the effective sample size), used if ESS >= 100.
+            weighted posterior samples (n_is of them; with the effective sample size), used if ESS >= min_ess;
+            otherwise a planet + moon fit at that h (the fit's device and run settings; GPU_LOG Round 9.5: with
+            the moon model left at the fixed h the profile was biased low, e.g. -25.6 instead of ~-5).
         Each model's ln Z is the highest of those evaluated (including the fixed-h fit), so the result is the profile
         over h (within ~1.5 nats of the marginal in Round 9.3). Stores results["gp_profile"] (dlogz, dlogzerr, the
         lnZ and GP of each model, the planet iterations) and results["dlogz_conservative"] = min(dlogz, profile
@@ -1283,9 +1286,23 @@ class NestedSampler:
                                how="importance sampling (moon model's h)"))
         if F > 0:
             lz_m = float(np.logaddexp(lz_m, math.log(F) + pl["logz"] + dzp))
-        if ess_m >= 100:
+        if ess_m >= min_ess:
             cand_m.append(dict(gp=repr(g_m), logz=lz_m, logzerr=res["logzerr"], ess=ess_m,
                                how="importance sampling"))
+        else:
+            # too few effective samples: a planet + moon fit at the moon model's h
+            sub = None if self.log_dir is None else os.path.join(self.log_dir, "gp_profile", "moon")
+            S = NestedSampler(like_of(g_m), self.priors, model="moon", compare_planet=False,
+                              moon_phase=self._moon_phase, ld_correlation=self.ld_correlation, log_dir=sub,
+                              resume="overwrite", threads=self.threads, seed=self.seed, verbose=False,
+                              supersampling=None, device=self.device, gpu_options=self.gpu_options)
+            r = S.run(max_weighted_samples=n_is, **getattr(self, "_run_kw", {}))
+            lz_f = r["logz"]
+            Ff = S.models["moon"].F_excluded
+            if Ff > 0:
+                lz_f = float(np.logaddexp(lz_f, math.log(Ff) + pl["logz"] + dzp))
+            cand_m.append(dict(gp=repr(g_m), logz=lz_f, logzerr=r["logzerr"], ess=ess_m,
+                               how="planet + moon fit (importance sampling ESS too low)"))
         # the planet-only model at its own h (planet-only fits)
         g = refit(self.parameters(model="planet"), L)
         iters = []
