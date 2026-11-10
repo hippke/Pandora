@@ -38,11 +38,15 @@ class Likelihood(object):
     accepts); the call goes straight to the compiled model (P8).
 
     gp: None (default: white noise, as above) or a pandoramoon.gp.GP with fixed
-    hyperparameters (amp, tau, err_scale): simultaneous GP detrending, the
-    light curve is fitted as model + GP + white noise instead of being
-    detrended first (pandoramoon/gp.py). The data must then be the raw
-    (normalised, not detrended) flux, in ascending time. The same GP is used
-    by the planet-only model of NestedSampler.
+    hyperparameters: simultaneous GP detrending, the light curve is fitted as
+    model + GP + white noise instead of being detrended first
+    (pandoramoon/gp.py). GP(amp, tau, err_scale) is one SHO term; GP(terms=
+    [SHO(...), Rotation(...)], baseline="offset" / "linear", gap=...) sums of
+    terms, a baseline per segment (marginalised) and independent segments.
+    The data must then be the raw (normalised, not detrended) flux, in
+    ascending time; flares flagged by GP.flag_outliers / GP.fit(clip=True)
+    should be set to NaN. The same GP is used by the planet-only model of
+    NestedSampler.
     """
 
     def __init__(
@@ -114,7 +118,7 @@ class Likelihood(object):
         self.gp = gp
         self.gp_tables = None
         if gp is not None:
-            from pandoramoon.gp import GP, gp_setup, output_times
+            from pandoramoon.gp import GP, output_times
             if not isinstance(gp, GP):
                 raise TypeError("gp must be a pandoramoon.gp.GP (or None)")
             if not self.time_sorted:
@@ -125,8 +129,7 @@ class Likelihood(object):
             yerr_v = np.ascontiguousarray(np.where(valid, yerr, 1.0))
             y1 = np.ascontiguousarray(np.where(valid, data - 1.0, 0.0))
             self.time_out = t_out
-            self.gp_tables = gp_setup(t_out, y1, (gp.err_scale * yerr_v) ** 2, np.ascontiguousarray(valid),
-                                      yerr_v, gp.amp, gp.tau)
+            self.gp_tables = gp.setup(t_out, y1, np.ascontiguousarray(valid), yerr_v)
             self._gp_tail = (
                 self.epoch_distance, self.supersampling_factor, self.occult_small_threshold,
                 self.hill_sphere_threshold, self.time) + tuple(self.gp_tables) + (self.cache, self.time_sorted)

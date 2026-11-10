@@ -221,6 +221,24 @@ def model_flux(like, params):
     return np.asarray(f)
 
 
+def residual_scatter(like, params):
+    """The noise model's check at a fit (e.g. the best fit of NestedSampler): chi^2 / N of the residuals with the
+    likelihood's errors (with a GP: of the whitened residuals, the Kalman innovations), and the number N of points.
+    About 1 +- sqrt(2 / N) when the noise model fits; well above it, the residuals are larger than the error bars
+    (red noise or trends left by the detrending, underestimated errors): the evidences are then not reliable and
+    the fit is slow (the sampler's runs disagree and it escalates)."""
+    f = model_flux(like, params)
+    if getattr(like, "gp", None) is not None:
+        from pandoramoon.gp import whiten_deficit
+        g = like.gp_tables
+        r = g[3] + whiten_deficit(np.ascontiguousarray(1.0 - f), g[0], g[1], g[2])
+        ok = g[2] > 0
+        return float(np.sum(r[ok] ** 2) / max(1, ok.sum())), int(ok.sum())
+    ok = like.inv_err > 0
+    r = (like.data - f) * like.inv_err
+    return float(np.sum(r[ok] ** 2) / max(1, ok.sum())), int(ok.sum())
+
+
 def epoch_jackknife(like, params_moon, params_planet, jack_min=JACK_MIN):
     """How the improvement of the planet+moon fit over the planet-only fit is spread over the transits.
     Per transit epoch: Delta chi^2 = chi^2(planet only) - chi^2(planet + moon) at the two best fits (with the

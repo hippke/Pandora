@@ -323,18 +323,33 @@ def _loglike(u, D):
 @njit(cache=True)
 def _loglike_gp(u, D):
     """_loglike with the simultaneous GP (Likelihood(gp=...)): D has the GP tables appended (24-31: F, K, irs, e,
-    W, v, c0, ld of pandoramoon.gp.gp_setup)"""
+    W, v, H, c0, ld of pandoramoon.gp.GP.setup)"""
     th, lw = _theta(u, D)
     if not lw > LOGZERO:
         return LOGZERO
     if D[9] == 0:
         return lw + pandora_loglike_planet_gp(th[0], th[1], th[2], th[3], th[4], th[5], th[6], th[7], th[8], th[9],
                                               th[10], th[11], D[0], D[1], D[2], D[3], D[4], D[24], D[25], D[26],
-                                              D[27], D[28], D[29], D[30], D[31], None, D[8])
+                                              D[27], D[28], D[29], D[30], D[31], D[32], None, D[8])
     return lw + pandora_loglike_gp(th[0], th[1], th[2], th[3], th[4], th[5], th[6], th[7], th[8], th[9], th[10],
                                    th[11], th[12], th[13], th[14], th[15], th[16], th[17], th[18], th[19], D[0], D[1],
-                                   D[2], D[3], D[4], D[24], D[25], D[26], D[27], D[28], D[29], D[30], D[31], None,
-                                   D[8])
+                                   D[2], D[3], D[4], D[24], D[25], D[26], D[27], D[28], D[29], D[30], D[31], D[32],
+                                   None, D[8])
+
+
+@njit(cache=True)
+def _ll_batch(U, D):
+    """_loglike_gp for the rows of U (gp_profile's importance sampling)"""
+    out = np.empty(U.shape[0])
+    for i in range(U.shape[0]):
+        out[i] = _loglike_gp(U[i], D)
+    return out
+
+
+def _hvec(g):
+    """the hyperparameters of a GP as one positive vector (gp_profile's convergence test)"""
+    v = [float(x) for t in g.terms for x in t.key()[1:]] + [g.err_scale]
+    return np.maximum(np.array(v), 1e-12)
 
 
 @njit(cache=True)
@@ -529,7 +544,7 @@ class _Model:
         self.ll = _loglike
         if getattr(like, "gp", None) is not None:
             g = like.gp_tables
-            self.D = self.D + (g[0], g[1], g[2], g[3], g[4], g[5], float(g[6]), float(g[7]))
+            self.D = self.D + (g[0], g[1], g[2], g[3], g[4], g[5], g[6], float(g[7]), float(g[8]))
             self.ll = _loglike_gp
 
     @staticmethod
@@ -986,11 +1001,15 @@ class NestedSampler:
     device: "cpu" (default) or "gpu" (the planet+moon fit on an NVIDIA GPU, pandoramoon.gpu; the planet-only fit
         stays on the CPU and runs concurrently). gpu_options: keyword arguments of pandoramoon.gpu.sampler.GPURunPool
         (e.g. slots, k) for device="gpu".
+    gp_profile: False (default) or True: with Likelihood(gp=...), after run() also the conservative Bayes factor
+        with each model at its own GP hyperparameters (gp_profile(); a few planet-only fits on the CPU):
+        results["gp_profile"], results["dlogz_conservative"]. Recommended for a moon claim with a GP.
     """
 
     def __init__(self, likelihood, priors, model="moon", compare_planet=True, moon_phase="auto", ld_correlation=0.0,
                  log_dir=None, resume="subfolder", threads=None, seed=1, verbose=True, supersampling="auto",
-                 planet_evidence="is", device="cpu", gpu_options=None):
+                 planet_evidence="is", device="cpu", gpu_options=None, gp_profile=False):
+        self.gp_profile_opt = bool(gp_profile)
         if model not in ("moon", "planet"):
             raise ValueError('model must be "moon" or "planet"')
         if device not in ("cpu", "gpu"):
@@ -1116,6 +1135,7 @@ class NestedSampler:
             accuracy = str(settings()["fit"]["default_accuracy"])
         kw = dict(accuracy=accuracy, threads=self.threads, seed=self.seed)
         kw.update(nss_kw)
+        self._run_kw = dict(nss_kw, accuracy=accuracy)        # gp_profile's moon refit uses the same settings
         out = {}
         order = [n for n in ("planet", "moon") if n in self.models]
 
@@ -1186,7 +1206,136 @@ class NestedSampler:
                 _write_results(path, out[name], pr)
         self._add_checks(res)
         self.results = res
+        if self.gp_profile_opt and self.model == "moon" and "planet" in res and \
+                getattr(self.likelihood, "gp", None) is not None:
+            self.gp_profile()
         return res
+
+    def gp_profile(self, max_iter=4, tol=0.02, n_is=20000, min_ess=100):
+        """The conservative Bayes factor of a fit with a simultaneous GP (Likelihood(gp=...); NestedSampler(...,
+        gp_profile=True) calls it after run()). The fit holds the GP hyperparameters h fixed for both models, at
+        values usually estimated outside the transits. Given a free GP, the planet-only model can explain part of a
+        moon's dips as stellar variability (GPU_LOG Round 9.3: the GP test case, 5 noise seeds: Delta lnZ 1406-1595
+        with h fixed, 347-376 marginalised over h; without a moon the two agree to 0.1 nats). This puts each model at
+        its own h:
+          planet only: h refitted (GP.fit of the same kernel form, all data) on the residuals of its best fit, a
+            planet-only fit (CPU) at that h, repeated until h changes by less than tol (in ln h) or max_iter fits;
+          planet + moon: h refitted on the residuals of its best fit; ln Z there by importance sampling of the fit's
+            weighted posterior samples (n_is of them; with the effective sample size), used if ESS >= min_ess;
+            otherwise a planet + moon fit at that h (the fit's device and run settings; GPU_LOG Round 9.5: with
+            the moon model left at the fixed h the profile was biased low, e.g. -25.6 instead of ~-5).
+        Each model's ln Z is the highest of those evaluated (including the fixed-h fit), so the result is the profile
+        over h (within ~1.5 nats of the marginal in Round 9.3). Stores results["gp_profile"] (dlogz, dlogzerr, the
+        lnZ and GP of each model, the planet iterations) and results["dlogz_conservative"] = min(dlogz, profile
+        dlogz), and adds a warning when the profile is well below the fixed-h Bayes factor. Returns the dict."""
+        from pandoramoon.likelihood import Likelihood
+        from pandoramoon.search import model_flux
+        from pandoramoon.gp import GP
+        res = self.results
+        L = self.likelihood
+        g0 = getattr(L, "gp", None)
+        if res is None or self.model != "moon" or "planet" not in res or g0 is None:
+            raise ValueError("gp_profile: needs a finished planet + moon fit (with the planet-only comparison) "
+                             "with Likelihood(gp=...)")
+        opts = g0.refit_options()
+        if opts is None:
+            raise ValueError(f"gp_profile: no GP.fit kernel has the form of {g0!r}")
+        t0 = time.perf_counter()
+        ok = L.inv_err > 0
+        data = np.where(ok, L.data, np.nan)
+        yerr = np.where(ok, 1.0 / np.where(ok, L.inv_err, 1.0), 1.0)
+        t_out = L.time_out
+
+        def refit(params, like):
+            f = model_flux(like, params)
+            return GP.fit(t_out, data - f + 1.0, yerr, **opts)
+
+        def like_of(g):
+            return Likelihood(L.time, data, yerr, epoch_distance=L.epoch_distance,
+                              supersampling_factor=L.supersampling_factor,
+                              occult_small_threshold=L.occult_small_threshold,
+                              hill_sphere_threshold=L.hill_sphere_threshold, cache=L.cache, gp=g)
+
+        def is_logz(r, mname, g):
+            """ln Z(g) - ln Z(fit) for model mname by importance sampling of r's weighted samples, and the ESS"""
+            ws = r["weighted_samples"]
+            w = np.asarray(ws["weights"], dtype=np.float64)
+            ti, w = _thin(w / w.sum(), n_is, seed=2)
+            w = w / w.sum()
+            U = np.ascontiguousarray(np.asarray(ws["upoints"])[ti])
+            m = self.models[mname]
+            tb = like_of(g).gp_tables
+            D1 = tuple(m.D[:24]) + (tb[0], tb[1], tb[2], tb[3], tb[4], tb[5], tb[6], float(tb[7]), float(tb[8]))
+            lw = np.log(w) + _ll_batch(U, D1) - _ll_batch(U, m.D)
+            lz = float(np.logaddexp.reduce(lw))
+            q = np.exp(lw - lz)
+            return lz, float(1.0 / np.sum(q * q))
+
+        pl = res["planet"]
+        cand_p = [dict(gp=repr(g0), logz=pl["logz"], logzerr=pl["logzerr"], how="fit (fixed h)")]
+        cand_m = [dict(gp=repr(g0), logz=res["logz"], logzerr=res["logzerr"], how="fit (fixed h)")]
+        # the moon model at its own h (importance sampling of its samples, and the planet's for the excluded part)
+        g_m = refit(self.parameters(), L)
+        dz, ess_m = is_logz(res, "moon", g_m)
+        lz_raw = res["logz"] - res.get("logz_excluded_correction", 0.0)
+        lz_m = lz_raw + dz
+        F = self.models["moon"].F_excluded
+        dzp, ess_pm = is_logz(pl, "planet", g_m)
+        if ess_pm >= 100:
+            cand_p.append(dict(gp=repr(g_m), logz=pl["logz"] + dzp, logzerr=pl["logzerr"], ess=ess_pm,
+                               how="importance sampling (moon model's h)"))
+        if F > 0:
+            lz_m = float(np.logaddexp(lz_m, math.log(F) + pl["logz"] + dzp))
+        if ess_m >= min_ess:
+            cand_m.append(dict(gp=repr(g_m), logz=lz_m, logzerr=res["logzerr"], ess=ess_m,
+                               how="importance sampling"))
+        else:
+            # too few effective samples: a planet + moon fit at the moon model's h
+            sub = None if self.log_dir is None else os.path.join(self.log_dir, "gp_profile", "moon")
+            S = NestedSampler(like_of(g_m), self.priors, model="moon", compare_planet=False,
+                              moon_phase=self._moon_phase, ld_correlation=self.ld_correlation, log_dir=sub,
+                              resume="overwrite", threads=self.threads, seed=self.seed, verbose=False,
+                              supersampling=None, device=self.device, gpu_options=self.gpu_options)
+            r = S.run(max_weighted_samples=n_is, **getattr(self, "_run_kw", {}))
+            lz_f = r["logz"]
+            Ff = S.models["moon"].F_excluded
+            if Ff > 0:
+                lz_f = float(np.logaddexp(lz_f, math.log(Ff) + pl["logz"] + dzp))
+            cand_m.append(dict(gp=repr(g_m), logz=lz_f, logzerr=r["logzerr"], ess=ess_m,
+                               how="planet + moon fit (importance sampling ESS too low)"))
+        # the planet-only model at its own h (planet-only fits)
+        g = refit(self.parameters(model="planet"), L)
+        iters = []
+        for it in range(int(max_iter)):
+            sub = None if self.log_dir is None else os.path.join(self.log_dir, "gp_profile", f"planet{it}")
+            S = NestedSampler(like_of(g), self.priors, model="planet", ld_correlation=self.ld_correlation,
+                              log_dir=sub, resume="overwrite", threads=self.threads, seed=self.seed, verbose=False,
+                              supersampling=None, planet_evidence=self.planet_evidence)
+            r = S.run(max_weighted_samples=n_is)
+            cand_p.append(dict(gp=repr(g), logz=r["logz"], logzerr=r["logzerr"], how=f"planet-only fit {it}"))
+            g_new = refit(S.parameters(), S.likelihood)
+            step = float(np.max(np.abs(np.log(_hvec(g_new)) - np.log(_hvec(g)))))
+            iters.append(dict(gp=repr(g), logz=r["logz"], next=repr(g_new), step=step))
+            g = g_new
+            if step < tol:
+                break
+        bm = max(cand_m, key=lambda c: c["logz"])
+        bp = max(cand_p, key=lambda c: c["logz"])
+        d = bm["logz"] - bp["logz"]
+        out = dict(dlogz=float(d), dlogzerr=float(math.hypot(bm["logzerr"], bp["logzerr"])), dlogz_fixed=res["dlogz"],
+                   moon=bm, planet=bp, candidates_moon=cand_m, candidates_planet=cand_p, planet_iterations=iters,
+                   ess_moon=ess_m, seconds=time.perf_counter() - t0)
+        res["gp_profile"] = out
+        res["dlogz_conservative"] = float(min(res["dlogz"], d))
+        if d < res["dlogz"] - max(3.0, 0.1 * abs(res["dlogz"])):
+            res.setdefault("warnings", []).append(
+                f"with the GP hyperparameters refitted for each model, Delta lnZ = {d:.1f} (fixed h: "
+                f"{res['dlogz']:.1f}): the planet-only model explains part of the signal with stellar variability "
+                f"({bp['gp']}); quote the conservative value")
+        if self.log_dir is not None:
+            with open(os.path.join(self.log_dir, "gp_profile.json"), "w") as fh:
+                json.dump(out, fh, indent=1, default=float)
+        return out
 
     def _add_checks(self, res):
         """epoch jackknife and warnings (Round 22)"""
@@ -1204,6 +1353,19 @@ class NestedSampler:
                 warn.append(f"{100 * (jk['top_share'] or 1):.0f} % of the fit improvement of the moon model comes from "
                             f"one transit (epoch {jk['top_epoch']}; without it Delta chi2 = {jk['dchi2_without_top']:.1f} "
                             f"< {jk['jack_min']:.0f}): likely an artefact of that transit, not a moon")
+        try:
+            from pandoramoon.search import residual_scatter
+            self.results = res
+            chi, npts = residual_scatter(self.likelihood, self.parameters())
+            res["residual_chi2"] = chi
+            if npts > 20 and chi > 1.0 + max(0.25, 6.0 * math.sqrt(2.0 / npts)):
+                warn.append(f"the residuals of the best fit are {math.sqrt(chi):.2f} x the error bars (chi2 / N = "
+                            f"{chi:.2f}, N = {npts}): the noise model does not fit (red noise or trends left by the "
+                            "detrending, or underestimated errors). Evidences are then unreliable and fits slow; "
+                            "inflate the errors (prepare_lightcurve's beta) or fit the trend (Likelihood(gp=...))")
+        except Exception as ex:                     # a diagnostic only
+            res["residual_chi2"] = None
+            warn.append(f"residual check failed: {ex}")
         for name, r in (("planet + moon" if self.model == "moon" else "planet", res), ("planet only", res.get("planet"))):
             if r is None:
                 continue
@@ -1241,6 +1403,12 @@ class NestedSampler:
             btxt, fav, words = bayes_factor_words(r["dlogz"])
             print(f'Bayes factor: {btxt} in favor of the {fav} model; Jeffreys\' scale: "{words}" evidence '
                   "(for white noise and correct models; see the documentation for the caveats)")
+            gpp = r.get("gp_profile")
+            if gpp:
+                print(f"GP hyperparameters refitted for each model (gp_profile): dlogZ = {gpp['dlogz']:.3f} +- "
+                      f"{gpp['dlogzerr']:.3f}; conservative dlogZ = {r['dlogz_conservative']:.3f}\n"
+                      f"    planet + moon at {gpp['moon']['gp']} ({gpp['moon']['how']}), planet only at "
+                      f"{gpp['planet']['gp']} ({gpp['planet']['how']})")
         jk = r.get("jackknife")
         if jk:
             print("Epoch jackknife (chi2 improvement of the moon fit per transit): " +

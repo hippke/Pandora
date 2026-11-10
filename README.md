@@ -85,16 +85,21 @@ results = pandora.NestedSampler(like, priors).run()    # full fit; 30-min data a
 ```
 
 ### On an NVIDIA GPU, and with simultaneous GP detrending
-`NestedSampler(..., device="gpu")` runs the planet+moon fit on an NVIDIA GPU (`pip install pandoramoon[gpu]`; FP32 kernels, validated against the FP64 CPU model). On a consumer RTX 5060 the [GPU tutorial](https://github.com/hippke/Pandora/blob/main/examples/tutorial_characterisation_gpu.ipynb) fit takes 36 s instead of 164 s on all 32 threads of a Ryzen 9 7950X; on real Kepler light curves the likelihood is about 10x faster than on that CPU. Scope: circular planet orbits, moon eccentricity <= 0.9.
+`NestedSampler(..., device="gpu")` runs the planet+moon fit on an NVIDIA GPU (`pip install pandoramoon[gpu]`; FP32 kernels, validated against the FP64 CPU model). On a consumer RTX 5060 the [GPU tutorial](https://github.com/hippke/Pandora/blob/main/examples/tutorial_characterisation_gpu.ipynb) fit takes 36 s instead of 164 s on all 32 threads of a Ryzen 9 7950X; on real Kepler light curves the likelihood is 6-10x faster than on that CPU. Scope: circular planet orbits, moon eccentricity <= 0.9.
 
 `Likelihood(time, flux, flux_err, ..., gp=GP(amp, tau, err_scale))` fits the raw light curve as transit model + Gaussian process + white noise instead of detrending it first (**experimental**). The GP is an SHO kernel with fixed hyperparameters (estimate them with `GP.fit` on the data outside the transits), computed exactly by a Kalman filter on the CPU and the GPU; the planet-only model uses the same GP. The [GP tutorial](https://github.com/hippke/Pandora/blob/main/examples/tutorial_characterisation_GP.ipynb) shows a case where a masked biweight filter produces a false moon and the GP does not.
+
+With the hyperparameters fixed, the Bayes factor of a *real* moon is too high: a planet-only model with a free GP explains part of the moon's dips as stellar variability (test case: ΔlnZ 1406 with fixed hyperparameters, ~347 marginalised over them; without a moon both agree to 0.1). `NestedSampler(..., gp_profile=True)` refits the hyperparameters for each model (seconds to a minute) and reports `results["dlogz_conservative"]`: quote that one. The GP's cost does not grow with the data around the transits (gaps longer than the GP's decay time are skipped), so give `GP.fit` and the fit ±3 d around each transit or the whole light curve. Speed on Kepler-747 b (Ryzen 9 7950X, 32 threads / RTX 5060): white noise 0.66 / 5.8 M likelihood calls per second, GP 0.51 / 3.2.
 
 ```
 from pandoramoon.gp import GP
 gp = GP.fit(time, flux, flux_err, mask=in_transit_and_moon_reach)     # hyperparameters, milliseconds
 like = pandora.Likelihood(time, flux, flux_err, epoch_distance=P, gp=gp)   # raw (normalised) flux, not detrended
-results = pandora.NestedSampler(like, priors, device="gpu").run()          # or device="cpu"
+results = pandora.NestedSampler(like, priors, device="gpu", gp_profile=True).run()   # or device="cpu"
+print(results["dlogz"], results["dlogz_conservative"])   # quote the conservative Bayes factor
 ```
+
+Options for real light curves (all on the CPU and the GPU): `GP.fit(..., kernel="sho_q" | "sho2" | "rotation")` for an SHO term with a fitted quality factor, two terms (slow trend + granulation), or a rotation kernel (celerite2's `RotationTerm` + granulation; needs data covering several rotations); `baseline="offset"` or `"linear"` with `gap=0.5` for a marginalised baseline per segment (Kepler quarters, or data windows around each transit), with the GP independent across gaps; `clip=True` flags flares (also inside the transit windows) and outliers, returned as `gp.outliers` (set those fluxes to NaN). Terms can also be combined by hand: `GP(terms=[SHO(amp, tau, Q), Rotation(amp, period)], baseline="offset", gap=0.5)`.
 
 ### Fitting: evidence and posterior with the built-in nested sampler
 `NestedSampler` fits a `Likelihood` with priors, compares planet+moon with planet-only (Bayes factor) and checks its own convergence. Parameters are Pandora's (same names and units); give a prior or a fixed number for each. The limb darkening is set as `q1, q2` (Kipping) or `u1, u2` (e.g. `Normal` priors from stellar models, with `ld_correlation`). `w_bary`, `ecc_bary`, `ecc_moon` and `w_moon` default to 0.

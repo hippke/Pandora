@@ -42,6 +42,50 @@ def sho_k(dt, amp, tau):
     return amp ** 2 * np.exp(-x) * (np.cos(x) + np.sin(x))
 
 
+def kern_sho(dt, amp, tau, Q):
+    """celerite's SHOTerm (S0 w0 Q = amp^2), written independently of pandoramoon.gp"""
+    s = np.abs(dt) / tau
+    if Q > 0.5:
+        eta = math.sqrt(1 - 1 / (4 * Q * Q))
+        return amp ** 2 * np.exp(-s / (2 * Q)) * (np.cos(eta * s) + np.sin(eta * s) / (2 * eta * Q))
+    if Q == 0.5:
+        return amp ** 2 * np.exp(-s) * (1 + s)
+    f = math.sqrt(1 - 4 * Q * Q)
+    return amp ** 2 * 0.5 * np.exp(-s / (2 * Q)) * ((1 + 1 / f) * np.exp(f * s / (2 * Q))
+                                                     + (1 - 1 / f) * np.exp(-f * s / (2 * Q)))
+
+
+def dense_cov(g, t):
+    """the covariance of the GP terms + baseline at t (segments independent), without the white noise"""
+    seg = np.cumsum(g.segment_starts(t))
+    dt = t[:, None] - t[None, :]
+    C = np.zeros((len(t), len(t)))
+    for s in g.sho:
+        C += kern_sho(dt, s.amp, s.tau, s.Q)
+    if g.baseline:
+        C += g.baseline_sd[0] ** 2
+    if g.baseline == "linear":
+        t0 = np.array([t[seg == k][0] for k in seg])
+        C += g.baseline_sd[1] ** 2 * np.outer(t - t0, t - t0)
+    return np.where(seg[:, None] == seg[None, :], C, 0.0)
+
+
+def general_gps():
+    from pandoramoon.gp import SHO, Rotation
+    return {
+        "SHO Q=3": GP(4e-4, 0.3, 1.2, Q=3.0),
+        "SHO Q=0.5": GP(4e-4, 0.3, 1.2, Q=0.5),
+        "SHO Q=0.3": GP(4e-4, 0.3, 1.2, Q=0.3),
+        "SHO, gap": GP(4e-4, 0.3, 1.2, gap=0.5),
+        "SHO + offset": GP(4e-4, 0.3, 1.2, baseline="offset"),
+        "SHO + linear, gap": GP(4e-4, 0.3, 1.2, baseline="linear", gap=0.5),
+        "2 SHO + offset, gap": GP(terms=[SHO(4e-4, 0.8), SHO(1.5e-4, 0.05)], err_scale=1.1, baseline="offset",
+                                  gap=0.5),
+        "Rotation + SHO + linear, gap (d=8)": GP(terms=[Rotation(5e-4, 1.5, 1.0, 2.0, 0.4), SHO(1e-4, 0.05)],
+                                                err_scale=0.9, baseline="linear", gap=0.5),
+    }
+
+
 def dataset(ss, rng, amp=4e-4, tau=0.3, s=1.2):
     tc = np.concatenate([T0 + e * P + np.arange(-1, 1, 1 / 144) for e in range(4)])
     tc = tc[rng.random(len(tc)) > 0.05]
@@ -79,6 +123,215 @@ def test_dense():
         got = pandora_loglike_planet_gp(*pp, P + 0.01, ss, 0.0, 1.2, L.time, *L.gp_tables, None, True)
         err = abs(got - (-0.5 * z @ z - ld))
         check(f"planet-only model = dense algebra (supersampling {ss})", err < 1e-6, f"error {err:.1e}")
+
+
+def test_skip():
+    """gap skipping (gp_horizon) inside continuous data: 40 days at 30-min cadence, transits every 10 days; the
+    D-filter skips the gaps between the windows (horizon ~4.5 d < the gaps) and restarts from state 0: = dense algebra and
+    = the D-filter over the whole span (H = n - c: no skip)"""
+    from pandoramoon.gp import pandora_loglike_gp
+    rng = np.random.default_rng(11)
+    P2 = 10.0
+    tc = np.arange(T0 - 5.0, T0 + 35.0, 1 / 48)
+    yerr = np.full(len(tc), 2e-4)
+    for name, g in (("SHO", GP(4e-4, 0.3, 1.2)), ("SHO Q=3", GP(4e-4, 0.3, 1.2, Q=3.0))):
+        C = dense_cov(g, tc) + np.diag((g.err_scale * yerr) ** 2)
+        Lc = np.linalg.cholesky(C)
+        base = dict(BASE, per_bary=P2, a_bary=20.0, M_planet=1e25, M_moon=5e22)
+        _, _, f = pandora.pandora_flux(*base.values(), P2, 1, 0.0, 1.2, tc)
+        data = np.asarray(f) + Lc @ rng.standard_normal(len(tc))
+        L = pandora.Likelihood(tc, data, yerr, epoch_distance=P2, hill_sphere_threshold=1.2, gp=g)
+        tab = list(L.gp_tables)
+        H = tab[6]
+        noskip = tab[:6] + [len(tc) - np.arange(len(tc))] + tab[7:]
+        ld = np.sum(np.log(np.diag(Lc))) - np.sum(np.log(yerr))
+        e_dense = e_skip = 0.0
+        for _ in range(8):
+            p = dict(base, t0_bary_offset=rng.uniform(-0.05, 0.05), r_planet=rng.uniform(0.05, 0.12),
+                     tau_moon=rng.uniform(0, 1), per_moon=rng.uniform(0.8, 2.0))
+            _, _, fm = pandora.pandora_flux(*p.values(), P2, 1, 0.0, 1.2, tc)
+            z = np.linalg.solve(Lc, data - np.asarray(fm))
+            a = pandora_loglike_gp(*p.values(), P2, 1, 0.0, 1.2, L.time, *tab, None, True)
+            b = pandora_loglike_gp(*p.values(), P2, 1, 0.0, 1.2, L.time, *noskip, None, True)
+            e_dense = max(e_dense, abs(a - (-0.5 * z @ z - ld)))
+            e_skip = max(e_skip, abs(a - b))
+        check(f"gap skipping ({name}, continuous data): = dense algebra and = no skipping",
+              e_dense < 1e-6 and e_skip < 1e-8 and np.median(H) < 400,
+              f"max error {e_dense:.1e} (dense), {e_skip:.1e} (no skip); median horizon {np.median(H):.0f} "
+              f"cadences < the gaps (~430)")
+        from pandoramoon.gp import gp_horizon
+        Hx = gp_horizon(tab[0], tab[1], 1e-12, len(tc))          # block >= n: the exact horizon
+        check(f"gp_horizon ({name}): blocked >= exact (conservative), mean excess <= 5 %",
+              bool(np.all(H >= Hx)) and np.mean(H - Hx) <= 0.05 * np.median(Hx) + 2,
+              f"excess max {int(np.max(H - Hx))}, mean {np.mean(H - Hx):.1f} steps (exact median {np.median(Hx):.0f})")
+
+
+def test_dense_general():
+    """the general kernels (any Q, sums of terms, Rotation, baselines, segments): moon and planet model = dense"""
+    from pandoramoon.gp import pandora_loglike_planet_gp
+    rng = np.random.default_rng(13)
+    for ss in (1, 3):
+        tc, time_, data, yerr, _ = dataset(ss, rng)
+        valid = np.isfinite(data)
+        for name, g in general_gps().items():
+            L = pandora.Likelihood(time_, data, yerr, epoch_distance=P + 0.01, supersampling_factor=ss,
+                                   hill_sphere_threshold=1.2, gp=g)
+            C = dense_cov(g, tc) + np.diag((g.err_scale * yerr) ** 2)
+            Lv = np.linalg.cholesky(C[np.ix_(valid, valid)])
+            ld = np.sum(np.log(np.diag(Lv))) - np.sum(np.log(yerr[valid]))
+            worst = 0.0
+            for _ in range(6):
+                p = dict(BASE, t0_bary_offset=rng.uniform(-0.05, 0.05), r_planet=rng.uniform(0.05, 0.12),
+                         tau_moon=rng.uniform(0, 1), Omega_moon=rng.uniform(-30, 30), per_moon=rng.uniform(0.8, 2.0))
+                _, _, fm = pandora.pandora_flux(*p.values(), P + 0.01, ss, 0.0, 1.2, time_)
+                z = np.linalg.solve(Lv, (data - np.asarray(fm))[valid])
+                worst = max(worst, abs(L(*p.values()) - (-0.5 * z @ z - ld)))
+            pp = list(BASE.values())[:12]
+            _, _, fp = pandora.pandora_flux(*pp, 0.0, 1e-6, 0, 0, 0, 0, 0, 0, P + 0.01, ss, 0.0, 1.2, time_)
+            z = np.linalg.solve(Lv, (data - np.asarray(fp))[valid])
+            got = pandora_loglike_planet_gp(*pp, P + 0.01, ss, 0.0, 1.2, L.time, *L.gp_tables, None, True)
+            worst = max(worst, abs(got - (-0.5 * z @ z - ld)))
+            check(f"{name}: moon + planet model = dense algebra (supersampling {ss}, d={g.dim})", worst < 1e-6,
+                  f"max error {worst:.1e}")
+
+
+def test_predict_sample_general():
+    """GP.predict = the dense conditional mean / sd; GP.sample has the kernel's covariance (general kernels)"""
+    rng = np.random.default_rng(17)
+    t = np.sort(np.concatenate([rng.uniform(0, 2, 200), rng.uniform(4, 6, 200)]))
+    yerr = np.full(len(t), 2e-4)
+    r = 1e-3 * np.sin(2 * t) + rng.normal(0, 2e-4, len(t))
+    mask = (t > 0.8) & (t < 1.1)
+    gps = general_gps()
+    worst = 0.0
+    for g in [gps["SHO Q=3"], gps["SHO + linear, gap"], gps["Rotation + SHO + linear, gap (d=8)"]]:
+        mean, sd = g.predict(t, r, yerr, mask=mask)
+        K = dense_cov(g, t)
+        o = ~mask
+        C = K[np.ix_(o, o)] + np.diag((g.err_scale * yerr[o]) ** 2)
+        A = np.linalg.solve(C, K[o]).T
+        dm = A @ r[o]
+        dv = np.diag(K) - np.sum(A * K[:, o], 1)
+        worst = max(worst, np.max(np.abs(mean - dm)) / 1e-3, np.max(np.abs(sd - np.sqrt(dv))) / 1e-3)
+    check("GP.predict (general) = dense conditional mean and sd", worst < 1e-6, f"max error / 1000 ppm {worst:.1e}")
+    from pandoramoon.gp import SHO, Rotation
+    ts = np.arange(0, 3000, 0.05)
+    worst = 0.0
+    for term in (SHO(1e-3, 0.4, 3.0), SHO(1e-3, 0.4, 0.3), Rotation(1e-3, 2.0, 1.0, 1.0, 0.5)):
+        xs = GP(terms=[term]).sample(ts, 3)
+        lags = np.array([0, 4, 10, 20])
+        acf = np.array([np.mean(xs[:len(xs) - k] * xs[k:]) for k in lags])
+        worst = max(worst, np.max(np.abs(acf - term.kernel(lags * 0.05))) / 1e-6)
+    check("GP.sample (Q != 1/sqrt 2, Rotation) has the kernel's covariance", worst < 0.08, f"max {worst:.3f}")
+
+
+def test_fit_general():
+    """GP.fit of the general kernels recovers the hyperparameters of draws of them"""
+    from pandoramoon.gp import SHO, Rotation
+    rng = np.random.default_rng(21)
+    t = np.arange(0, 60, 1 / 48)
+    tq = GP(4e-4, 0.5, Q=4.0)
+    y = 1 + tq.sample(t, rng) + rng.normal(0, 2e-4, len(t))
+    g = GP.fit(t, y, 2e-4, kernel="sho_q", bin_width=None)
+    ok = abs(g.amp / 4e-4 - 1) < 0.3 and abs(g.tau / 0.5 - 1) < 0.2 and abs(g.Q / 4 - 1) < 0.35
+    check("GP.fit(kernel='sho_q') recovers amp, tau, Q", ok, repr(g))
+    tr = GP(terms=[Rotation(1e-3, 3.3, 2.0, 3.0, 0.5), SHO(1.5e-4, 0.05)])
+    y = 1 + tr.sample(t, rng) + rng.normal(0, 2e-4, len(t))
+    g = GP.fit(t, y, 2e-4, kernel="rotation", bin_width=None)
+    rot = g.terms[0]
+    ok = abs(rot.period / 3.3 - 1) < 0.05 and abs(rot.amp / 1e-3 - 1) < 0.35
+    check("GP.fit(kernel='rotation') recovers the period and amplitude (periodogram start)", ok, repr(g))
+    off = np.where(t > 30, 3e-3, -2e-3)
+    t2 = np.concatenate([t[t < 29], t[t > 31]])
+    y2 = 1 + GP(4e-4, 0.5).sample(t2, rng) + np.interp(t2, t, off) + rng.normal(0, 2e-4, len(t2))
+    g = GP.fit(t2, y2, 2e-4, baseline="offset", gap=1.0, bin_width=None)
+    ok = abs(g.amp / 4e-4 - 1) < 0.3 and abs(g.tau / 0.5 - 1) < 0.3
+    g0 = GP.fit(t2, y2, 2e-4, bin_width=None)
+    check("GP.fit(baseline='offset', gap): segment offsets do not inflate amp / tau", ok,
+          f"{g} (without baseline: {g0})")
+
+
+def test_outliers():
+    """flag_outliers: injected flares (above the trend, also inside the transit mask) and outliers are flagged,
+    a transit dip inside the mask is not, few false flags"""
+    rng = np.random.default_rng(23)
+    t = np.arange(0, 20, 1 / 48)
+    g = GP(5e-4, 0.4)
+    y = 1 + g.sample(t, rng) + rng.normal(0, 1e-4, len(t))
+    mask = np.abs(t - 10) < 0.5                        # the transit window with the moon's reach
+    y[np.abs(t - 10) < 0.15] -= 3e-3                   # the planet's transit
+    fl = []
+    for t0 in (3.0, 7.0, 10.3, 15.0):                  # flares: 2.5e-3 peak, 1-h decay; one in the mask (moon reach)
+        k = np.argmin(np.abs(t - t0))
+        y[k:k + 8] += 2.5e-3 * np.exp(-np.arange(8) / 2.0)
+        fl.append(k)
+    out_lo = [100, 600]
+    y[out_lo] -= 1.5e-3                                # single low outliers outside the mask
+    bad = g.flag_outliers(t, y, 1e-4, mask=mask)
+    caught = all(bad[k] and bad[k + 1] for k in fl) and all(bad[k] for k in out_lo)
+    inj = np.zeros(len(t), bool)
+    for k in fl:
+        inj[k:k + 8] = True
+    inj[out_lo] = True
+    false = int(np.sum(bad & ~inj))
+    check("flag_outliers: flares (incl. inside the transit mask) and low outliers flagged", caught,
+          f"{int(np.sum(bad & inj))} of {int(inj.sum())} injected cadences flagged")
+    check("flag_outliers: no transit cadence and <= 2 others falsely flagged", false <= 2 and not np.any(
+        bad & (np.abs(t - 10) < 0.15)), f"{false} false flags")
+    gf = GP.fit(t, y, 1e-4, mask=mask, clip=True)
+    check("GP.fit(clip=True): returns the flagged points as .outliers", bool(np.all(gf.outliers[fl])),
+          f"{gf}, {int(gf.outliers.sum())} flagged")
+
+
+def test_steps():
+    """GP breaks (a free offset at given times), find_steps, and the single-cadence clip (GPU_LOG Round 9.6):
+    a break = two independent segments; an injected flux step is found, none in pure GP noise, a moon-like dip
+    (10 h, sharp ingress and egress) is not turned into steps; an isolated low cadence inside the transit mask is
+    clipped, the transit is not"""
+    rng = np.random.default_rng(31)
+    t = np.arange(0, 20, 1 / 48)
+    g = GP(1e-4, 0.14, baseline="offset", gap=0.5)
+    e = np.full(len(t), 1e-4)
+    y0 = 1 + g.sample(t, rng) + rng.normal(0, 1e-4, len(t))
+    b = 12.31
+    gb = GP(1e-4, 0.14, baseline="offset", gap=0.5, breaks=[b])
+    lo, hi = t < b, t >= b
+    split = g.loglike_noise(t[lo], y0[lo], e[lo]) + g.loglike_noise(t[hi], y0[hi], e[hi])
+    check("GP(breaks=[b]) = the two segments separately", abs(gb.loglike_noise(t, y0, e) - split) < 1e-8,
+          f"{gb.loglike_noise(t, y0, e):.9f} vs {split:.9f}")
+    check("GP(breaks): repr / key / refit_options carry the breaks", "breaks=[12.31]" in repr(gb)
+          and gb.key() != g.key() and np.allclose(gb.refit_options()["breaks"], [b]))
+    tm = np.abs(t - 10) < 0.15 + 1 / 48                 # the planet's transit (left out of the step search)
+    y = y0.copy()
+    y[np.abs(t - 10) < 0.15] -= 3e-3
+    ys = y.copy()
+    ys[t >= b] -= 7e-4                                   # a flux step of -700 ppm, 2.3 d after mid-transit
+    st = g.find_steps(t, ys, e, mask=tm, min_sep=1.0)
+    check("find_steps: the injected step found (within one cadence)", len(st) == 1 and abs(st[0] - b) < 1 / 48,
+          f"{st}")
+    none = [len(GP(1e-4, 0.14, baseline="offset", gap=0.5).find_steps(
+        t, 1 + GP(1e-4, 0.14).sample(t, np.random.default_rng(40 + k)) + np.random.default_rng(50 + k).normal(
+            0, 1e-4, len(t)), e, mask=tm, min_sep=1.0)) for k in range(5)]
+    check("find_steps: no step in pure GP noise (5 draws)", sum(none) == 0, f"{none}")
+    yd = y.copy()
+    yd[(t > 10.5) & (t < 10.5 + 10 / 24)] -= 4e-4      # a moon-like dip: 400 ppm (4 sigma per cadence), 10 h
+    sd = g.find_steps(t, yd, e, mask=tm, min_sep=1.0)
+    check("find_steps: a 10-h moon-like dip (400 ppm) is not taken for steps (min_sep 1 d)", len(sd) == 0, f"{sd}")
+    gf = GP.fit(t, ys, e, mask=np.abs(t - 10) < 0.45, baseline="offset", gap=0.5, clip=True,
+                steps=dict(mask=tm, min_sep=1.0))
+    check("GP.fit(steps=...): refit with the step as a break", len(gf.steps) == 1 and len(gf.breaks) == 1,
+          f"{gf}")
+    yc = y.copy()
+    k = int(np.argmin(np.abs(t - 10.3)))                 # inside the mask (moon zone), outside the transit
+    yc[k] -= 8e-4
+    gc = GP.fit(t, yc, e, mask=np.abs(t - 10) < 0.45, baseline="offset", gap=0.5, clip=True)
+    check("GP.fit(clip=True): an isolated low cadence inside the mask clipped, no transit cadence",
+          bool(gc.outliers[k]) and not np.any(gc.outliers & (np.abs(t - 10) < 0.15)),
+          f"{int(gc.outliers.sum())} clipped")
+    yd2 = yd.copy()
+    gd = GP.fit(t, yd2, e, mask=np.abs(t - 10) < 0.45, baseline="offset", gap=0.5, clip=True)
+    check("GP.fit(clip=True): no cadence of the 10-h moon-like dip clipped",
+          not np.any(gd.outliers & (t > 10.5) & (t < 10.5 + 10 / 24)), f"{int(gd.outliers.sum())} clipped")
 
 
 def test_white_limit():
@@ -144,6 +397,85 @@ def test_sampler():
     check("unit-cube likelihood = Likelihood(theta) + coordinate weight", ok)
     mp = S.models["planet"]
     check("planet-only model samples the GP likelihood too", mp.ll is _loglike_gp)
+    from pandoramoon.gp import SHO, Rotation
+    ro = [GP(1e-3, 0.5).refit_options()["kernel"], GP(1e-3, 0.5, Q=2.0, baseline="offset", gap=0.5).refit_options(),
+          GP(terms=[SHO(1e-3, 1.0), SHO(1e-4, 0.1)]).refit_options()["kernel"],
+          GP(terms=[Rotation(1e-3, 5.0), SHO(1e-4, 0.1)]).refit_options(),
+          GP(terms=[SHO(1e-3, 1.0, 3.0), SHO(1e-4, 0.1)]).refit_options()]
+    ok = (ro[0] == "sho" and ro[1]["kernel"] == "sho_q" and ro[1]["baseline"] == "offset" and ro[1]["gap"] == 0.5
+          and ro[2] == "sho2" and ro[3]["kernel"] == "rotation" and ro[3]["period"] == 5.0 and ro[4] is None)
+    check("GP.refit_options (gp_profile): the GP.fit kernel of each form, None for a hand-made sum", ok)
+
+
+def test_residual_scatter():
+    """search.residual_scatter (NestedSampler's noise-model warning): ~1 for the GP and for white noise, >> 1 for
+    the biweight-flattened trend case with white-noise errors"""
+    import gp_trend_case as G
+    from pandoramoon.search import residual_scatter
+    from pandoramoon.sampling import PARAMS
+    c = G.make(moon=True, seed=0)
+    p = {k: float(c["truth"].get(k, 0.0)) for k in PARAMS}
+    flat, _ = G.biweight(c, 1.5)
+    clean = G.make(moon=True, seed=0, trend=dict(a1_ppm=0.0, a2_ppm=0.0, sho_ppm=0.0))["flux"]
+    out = {}
+    for name, f, g in (("biweight", flat, None), ("GP", c["flux"], GP.fit(c["time"], c["flux"], c["yerr"],
+                                                                         mask=c["mask"])), ("white", clean, None)):
+        L = pandora.Likelihood(c["time"], f, c["yerr"], epoch_distance=c["epoch_distance"], hill_sphere_threshold=1.0,
+                               gp=g)
+        out[name] = residual_scatter(L, p)[0]
+    check("residual_scatter: GP and white noise ~1, biweight with white errors >> 1",
+          out["biweight"] > 5 and abs(out["GP"] - 1) < 0.15 and abs(out["white"] - 1) < 0.15,
+          ", ".join(f"{k} {v:.2f}" for k, v in out.items()))
+
+
+def _gpu_check(name, L, pri, ss, t0_ref, truth):
+    """GPU evaluator = CPU likelihood: random prior points (relative) and points near the truth (nats)"""
+    from pandoramoon.gpu.sampler import PandoraEvaluator
+    from numba import cuda
+    S = pandora.NestedSampler(L, pri, verbose=False, supersampling=ss)
+    m = S.models["moon"]
+    ev = PandoraEvaluator(m, S.likelihood, t0_ref=t0_ref)
+    rng = np.random.default_rng(7)
+    U = rng.uniform(size=(4096, m.ndim))
+    th, lw = m.native(U)
+    ok = lw > -1e299
+    n = len(U)
+    dU = cuda.to_device(np.ascontiguousarray(U))
+    dACT = cuda.to_device(np.ones(n, np.int32))
+    dLW = cuda.device_array(n, np.float64)
+    dLLK = cuda.device_array(n, np.float64)
+    ev.evaluate(dU, dACT, n, dLW, dLLK)
+    got = dLLK.copy_to_host()
+    ev.like.gp_budget = 1                   # large batches in parts (the rejection init's 100 000 draws): 4 x 1024
+    ev.evaluate(dU, dACT, n, dLW, dLLK)
+    parts = dLLK.copy_to_host()
+    ev.like.gp_budget = type(ev.like).gp_budget
+    check(f"GPU: a batch in parts = one launch ({name}, supersampling {ss})",
+          bool(np.array_equal(np.nan_to_num(parts, neginf=-1.0), np.nan_to_num(got, neginf=-1.0))))
+    ref = np.array([S.likelihood(*th[i]) if ok[i] else -np.inf for i in range(n)])
+    # random prior points are poor fits (logL -1e5 ... -2e4): FP32 rounding of the large terms, relative
+    # (GPU_LOG Round 9: at posterior points the error is 3e-4 nats median, 1.2e-3 max, below the white-noise path's)
+    fin = np.isfinite(ref) & (ref > -1e6)
+    rel = np.abs(got[fin] - ref[fin]) / np.abs(ref[fin])
+    check(f"GPU GP likelihood = CPU ({name}, supersampling {ss}, {fin.sum()} points)", np.max(rel) < 1e-5,
+          f"max |GPU - CPU| / |logL| {np.max(rel):.1e}, median {np.median(rel):.1e}")
+    inv = ~np.isfinite(ref)
+    check(f"GPU: -inf where the CPU has -inf ({name}, supersampling {ss})", bool(np.all(got[inv] == -np.inf)))
+    # near the posterior (the truth, perturbed): absolute error in nats
+    from pandoramoon.sampling import PARAMS as names
+    base = np.array([float(truth.get(p, getattr(pandora.model_params(), p, 0.0))) for p in names])
+    TH = np.repeat(base[None, :], 256, 0)
+    r_ = np.random.default_rng(3)
+    for j, p in enumerate(names):
+        if p in ("t0_bary_offset",):
+            TH[:, j] += r_.normal(0, 2e-3, 256)
+        elif p in ("r_moon", "r_planet"):
+            TH[:, j] *= 1 + r_.normal(0, 0.01, 256)
+    gl = ev.like(TH)
+    cl = np.array([S.likelihood(*TH[i]) for i in range(len(TH))])
+    err = np.abs(gl - cl)
+    check(f"GPU = CPU near the truth ({name}, supersampling {ss})", np.max(err) < 0.02,
+          f"|GPU - CPU| median {np.median(err):.1e}, max {np.max(err):.1e} nats")
 
 
 def test_gpu():
@@ -152,43 +484,51 @@ def test_gpu():
         check("GPU available", False, "no GPU / CUDA packages")
         return
     import gp_trend_case as G
-    from pandoramoon.gpu.sampler import PandoraEvaluator
-    from numba import cuda
-    for ss in (1, 3):
-        c = G.make(moon=True, seed=0)
-        g = GP.fit(c["time"], c["flux"], c["yerr"], mask=c["mask"])
+    from pandoramoon.gp import SHO, Rotation
+    c = G.make(moon=True, seed=0)
+    gps = [("SHO", 1, GP.fit(c["time"], c["flux"], c["yerr"], mask=c["mask"])),
+           ("SHO", 3, GP.fit(c["time"], c["flux"], c["yerr"], mask=c["mask"])),
+           ("SHO Q=3, gap (d=2)", 1, GP(1e-3, 0.5, Q=3.0, gap=0.5)),
+           ("SHO + offset, gap (d=3)", 3, GP.fit(c["time"], c["flux"], c["yerr"], mask=c["mask"], baseline="offset",
+                                                 gap=0.5)),
+           ("2 SHO + linear, gap (d=6)", 1, GP.fit(c["time"], c["flux"], c["yerr"], mask=c["mask"], kernel="sho2",
+                                                   baseline="linear", gap=0.5)),
+           ("Rotation + SHO + linear, gap (d=8)", 3,
+            GP(terms=[Rotation(1.2e-3, 6.0, 1.0, 1.0, 0.4), SHO(2e-4, 0.15)], baseline="linear", gap=0.5))]
+    pri = pandora.default_priors(t0_bary=c["t0_bary"], per_bary=c["per_bary"], r_planet=c["r_planet"])
+    for name, ss, g in gps:
         L = pandora.Likelihood(c["time"], c["flux"], c["yerr"], epoch_distance=c["epoch_distance"],
                                hill_sphere_threshold=1.0, gp=g)
-        pri = pandora.default_priors(t0_bary=c["t0_bary"], per_bary=c["per_bary"], r_planet=c["r_planet"])
-        S = pandora.NestedSampler(L, pri, verbose=False, supersampling=ss)
-        m = S.models["moon"]
-        ev = PandoraEvaluator(m, S.likelihood, t0_ref=c["t0_bary"])
-        rng = np.random.default_rng(7)
-        U = rng.uniform(size=(4096, m.ndim))
-        th, lw = m.native(U)
-        ok = lw > -1e299
-        n = len(U)
-        dU = cuda.to_device(np.ascontiguousarray(U))
-        dACT = cuda.to_device(np.ones(n, np.int32))
-        dLW = cuda.device_array(n, np.float64)
-        dLLK = cuda.device_array(n, np.float64)
-        ev.evaluate(dU, dACT, n, dLW, dLLK)
-        got = dLLK.copy_to_host()
-        ref = np.array([S.likelihood(*th[i]) if ok[i] else -np.inf for i in range(n)])
-        # random prior points are poor fits (logL -1e5 ... -2e4): FP32 rounding of the large terms, relative
-        # (GPU_LOG Round 9: at posterior points the error is 3e-4 nats median, 1.2e-3 max, below the white-noise path's)
-        fin = np.isfinite(ref) & (ref > -1e6)
-        rel = np.abs(got[fin] - ref[fin]) / np.abs(ref[fin])
-        check(f"GPU GP likelihood = CPU (supersampling {ss}, {fin.sum()} points)", np.max(rel) < 1e-5,
-              f"max |GPU - CPU| / |logL| {np.max(rel):.1e}, median {np.median(rel):.1e}")
-        inv = ~np.isfinite(ref)
-        check(f"GPU: -inf where the CPU has -inf (supersampling {ss})", bool(np.all(got[inv] == -np.inf)))
+        _gpu_check(name, L, pri, ss, c["t0_bary"], c["truth"])
+    # many epochs in continuous data (40 transits of a 2.5-day planet in 100 days at 30-min cadence): gap skipping
+    # with > 8 runs (one lane per run) and > 32 epochs (gp_runs across epoch groups); the offset baseline (no decay
+    # within the one segment) gives a single run over all epochs (the warp's span algorithm)
+    P2 = 2.5
+    tc = np.arange(T0 - 1.0, T0 + 99.0, 1 / 48)
+    truth = dict(BASE, per_bary=P2, a_bary=8.0, M_planet=1e25, M_moon=1e22, per_moon=0.4, r_moon=0.04)
+    rng = np.random.default_rng(5)
+    _, _, f = pandora.pandora_flux(*truth.values(), P2, 1, 0.0, 1.0, tc)
+    for name, g in (("SHO tau 0.05 d, 40 epochs", GP(4e-4, 0.05, 1.1)),
+                    ("2 SHO, 40 epochs (d=4)", GP(terms=[SHO(3e-4, 0.05), SHO(1e-4, 0.02, Q=2.0)], err_scale=1.1)),
+                    ("SHO + offset, 40 epochs (one run, d=3)", GP(4e-4, 0.05, 1.1, baseline="offset"))):
+        yerr = np.full(len(tc), 3e-4)
+        data = np.asarray(f) + g.sample(tc, rng=rng) + rng.normal(0, 3e-4, len(tc))
+        L = pandora.Likelihood(tc, data, yerr, epoch_distance=P2, hill_sphere_threshold=1.0, gp=g)
+        pri = pandora.default_priors(t0_bary=T0, per_bary=P2, r_planet=0.1)
+        _gpu_check(name, L, pri, 1, T0, truth)
 
 
 if __name__ == "__main__":
     test_dense()
+    test_skip()
+    test_dense_general()
+    test_predict_sample_general()
     test_white_limit()
     test_fit()
+    test_fit_general()
+    test_outliers()
+    test_steps()
+    test_residual_scatter()
     test_sampler()
     if "--gpu" in sys.argv:
         test_gpu()

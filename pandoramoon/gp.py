@@ -20,13 +20,24 @@ r = data - f = (data - 1) + D (deficit D = 1 - f, nonzero only near the transits
 
 The SHO is a two-state linear stochastic differential equation, so L^-1 is its Kalman filter: with fixed
 hyperparameters the gains, the innovation variances and e are computed once (``gp_setup``, float64), and each
-likelihood call only filters D (a two-number state recursion from the first to the last cadence of the model's
-window; the remaining cadences, where D = 0, are one closed-form term: ``gp_quad``). The log-likelihood is
+likelihood call only filters D (a two-number state recursion over the cadences of the model's windows; the
+remaining cadences, where D = 0, are closed-form terms: ``gp_quad``). Between windows the D-filter's state decays
+without input; after a gap longer than its horizon H (``gp_horizon``: the zero-input steps after which the state's
+influence is below 1e-12) the gap is not stepped: the decaying state's terms are the closed-form tail, and the next
+window starts from state 0 (dropped: cross terms below ~1e-8 nats). The log-likelihood is
 
     log L = -chi^2 / 2 - (sum_k ln L_kk - sum_k ln yerr_k)
 
 i.e. relative to the normalisation of the white-noise Likelihood: amp -> 0 with err_scale = 1 gives the white-noise
 value. The same GP enters the planet-only model (Bayes factors compare the models under the same noise model).
+
+General kernels (``GP(terms=[...], baseline=..., gap=...)``): a sum of SHO terms of any quality factor Q (``SHO``;
+``Rotation`` = celerite2's RotationTerm, two underdamped SHO terms at the rotation period and its half), optionally
+with a baseline per segment (``baseline="offset"`` or ``"linear"``, marginalised analytically with a wide Gaussian
+prior, ``baseline_sd``) and independent segments (``gap``: a new segment after a gap longer than ``gap`` days; the GP
+and the baseline restart there). All of it is one linear state-space model of d <= 8 states (2 per SHO term, 1 for
+an offset, 2 for a linear baseline), written in coordinates in which the observed sum is state 0; the per-call work
+is the same D-filter with d states (d = 2 uses the code of the single SHO, on the CPU and the GPU).
 """
 import math
 
@@ -39,51 +50,301 @@ from pandoramoon.kernel import (
 )
 
 _SQRT2 = math.sqrt(2.0)
+_Q0 = 1.0 / math.sqrt(2.0)              # the SHO quality of GP(amp, tau) (pizzetti's kernel)
+D_MAX = 8                               # states of the general model (the GPU kernel's limit)
+_BASELINES = (None, "offset", "linear")
+KERNELS = ("sho", "sho_q", "sho2", "rotation")
+
+
+def _pos(name, x):
+    x = float(x)
+    if not (x > 0 and math.isfinite(x)):
+        raise ValueError(f"{name} must be positive and finite, got {x}")
+    return x
+
+
+class SHO(object):
+    """One term of a GP kernel: the stochastically driven, damped harmonic oscillator (celerite's SHOTerm)
+
+        k(dt) = amp^2 exp(-s / (2 Q)) (cos(eta s) + sin(eta s) / (2 Q eta)),  s = |dt| / tau,  eta = sqrt(1 - 1/(4 Q^2))
+
+    (Q < 1/2: overdamped, cosh / sinh; Q = 1/2: critically damped). amp: rms (relative flux), tau = 1 / omega_0 [d],
+    Q: quality factor (default 1/sqrt(2): not oscillating, the kernel of GP(amp, tau)). Q > 1/2 oscillates with the
+    period 2 pi tau / eta (a quasi-periodic signal, e.g. spots), damped on the time scale 2 Q tau."""
+
+    def __init__(self, amp, tau, Q=_Q0):
+        self.amp, self.tau, self.Q = _pos("SHO amp", amp), _pos("SHO tau", tau), _pos("SHO Q", Q)
+
+    def __repr__(self):
+        return f"SHO(amp={self.amp:.6g}, tau={self.tau:.6g}, Q={self.Q:.6g})"
+
+    def key(self):
+        return ("sho", self.amp, self.tau, self.Q)
+
+    def sho_terms(self):
+        return [self]
+
+    def kernel(self, dt):
+        """k(dt) (numpy)"""
+        s = np.abs(np.asarray(dt, dtype=np.float64)) / self.tau
+        z = 0.5 / self.Q
+        if z < 1:
+            eta = math.sqrt(1 - z * z)
+            c = np.cos(eta * s) + z / eta * np.sin(eta * s)
+            return self.amp ** 2 * np.exp(-z * s) * c
+        if z == 1:
+            return self.amp ** 2 * np.exp(-s) * (1 + s)
+        eta = math.sqrt(z * z - 1)
+        return self.amp ** 2 * 0.5 * ((1 + z / eta) * np.exp(-(z - eta) * s) + (1 - z / eta) * np.exp(-(z + eta) * s))
+
+
+class Rotation(object):
+    """A rotation kernel (celerite2's RotationTerm): two underdamped SHO terms at the rotation period and at half of
+    it, for a spotted rotating star. amp: total rms (relative flux), period [d], Q0 > 0: quality of the secondary
+    (half-period) term minus 1/2, dQ >= 0: the primary term's quality above the secondary's, f in [0, 1]: the
+    secondary's variance relative to the primary's. The terms (Q1 = 1/2 + Q0 + dQ, Q2 = 1/2 + Q0) oscillate exactly
+    at period and period / 2. Needs data covering a few rotations to be constrained."""
+
+    def __init__(self, amp, period, Q0=1.0, dQ=1.0, f=0.5):
+        self.amp, self.period, self.Q0 = _pos("Rotation amp", amp), _pos("Rotation period", period), _pos("Q0", Q0)
+        self.dQ, self.f = float(dQ), float(f)
+        if not (self.dQ >= 0 and math.isfinite(self.dQ)):
+            raise ValueError(f"Rotation dQ must be >= 0, got {dQ}")
+        if not (0 <= self.f <= 1):
+            raise ValueError(f"Rotation f must be in [0, 1], got {f}")
+
+    def __repr__(self):
+        return (f"Rotation(amp={self.amp:.6g}, period={self.period:.6g}, Q0={self.Q0:.6g}, dQ={self.dQ:.6g}, "
+                f"f={self.f:.6g})")
+
+    def key(self):
+        return ("rotation", self.amp, self.period, self.Q0, self.dQ, self.f)
+
+    def sho_terms(self):
+        q1 = 0.5 + self.Q0 + self.dQ
+        w1 = 4 * math.pi * q1 / (self.period * math.sqrt(4 * q1 * q1 - 1))
+        out = [SHO(self.amp / math.sqrt(1 + self.f), 1 / w1, q1)]
+        if self.f > 0:
+            q2 = 0.5 + self.Q0
+            w2 = 8 * math.pi * q2 / (self.period * math.sqrt(4 * q2 * q2 - 1))
+            out.append(SHO(self.amp * math.sqrt(self.f / (1 + self.f)), 1 / w2, q2))
+        return out
+
+    def kernel(self, dt):
+        return sum(t.kernel(dt) for t in self.sho_terms())
 
 
 class GP(object):
     """Fixed hyperparameters of the simultaneous GP (see the module docstring).
 
+    GP(amp, tau, err_scale=1.0): one SHO term with Q = 1/sqrt(2) (the default; as pizzetti's GP);
+    GP(amp, tau, Q=...): one SHO term of quality Q;
+    GP(terms=[SHO(...), Rotation(...), ...]): a sum of terms (at most 8 states with the baseline: 2 per SHO, a
+    Rotation is 2 SHO terms).
+
     :param amp: rms of the GP, in relative flux (e.g. 3e-4 for 300 ppm)
     :param tau: time scale 1 / omega_0 in days
     :param err_scale: factor on yerr (the white noise is err_scale * yerr)
+    :param baseline: None, "offset" (a constant per segment) or "linear" (offset + slope per segment), each
+        marginalised analytically (a Gaussian prior with the sd baseline_sd = (offset, slope per day); wide by
+        default, the Bayes factor does not depend on it as long as it is wide)
+    :param gap: None (one segment) or a time in days: a gap longer than this starts a new, independent segment (the
+        GP and the baseline restart; e.g. Kepler quarters, or the data windows around each transit)
+    :param breaks: times [d] that also start a new segment (a free offset there, marginalised like the others):
+        flux steps, e.g. Kepler sudden pixel sensitivity dropouts (find_steps, GP.fit(steps=...)); needs a baseline
     """
 
-    kernel = "sho"
+    def __init__(self, amp=None, tau=None, err_scale=1.0, Q=None, terms=None, baseline=None, gap=None,
+                 baseline_sd=(0.01, 0.01), breaks=None):
+        if terms is None:
+            if amp is None or tau is None:
+                raise ValueError("GP: give amp and tau (one SHO term) or terms")
+            terms = [SHO(amp, tau, _Q0 if Q is None else Q)]
+        else:
+            if amp is not None or tau is not None or Q is not None:
+                raise ValueError("GP: give either amp, tau (and Q) or terms, not both")
+            terms = list(terms)
+            if not terms or not all(hasattr(x, "sho_terms") for x in terms):
+                raise ValueError("GP: terms must be a non-empty list of SHO / Rotation terms")
+        self.terms = terms
+        self.err_scale = _pos("GP err_scale", err_scale)
+        if baseline not in _BASELINES:
+            raise ValueError(f"GP: baseline must be one of {_BASELINES}, got {baseline!r}")
+        self.baseline = baseline
+        self.gap = None if gap is None else _pos("GP gap", gap)
+        self.breaks = np.unique(np.asarray([] if breaks is None else breaks, dtype=np.float64).ravel())
+        if len(self.breaks) and baseline is None:
+            raise ValueError("GP: breaks need a baseline (\"offset\" or \"linear\")")
+        sd = tuple(float(x) for x in np.broadcast_to(np.asarray(baseline_sd, dtype=np.float64), (2,)))
+        self.baseline_sd = (_pos("baseline_sd", sd[0]), _pos("baseline_sd", sd[1]))
+        self.sho = [s for x in terms for s in x.sho_terms()]
+        self.dim = 2 * len(self.sho) + {None: 0, "offset": 1, "linear": 2}[baseline]
+        if self.dim > D_MAX:
+            raise ValueError(f"GP: {self.dim} states, at most {D_MAX} (2 per SHO term, 2 per Rotation, 1-2 baseline)")
+        one = len(terms) == 1 and isinstance(terms[0], SHO)
+        self.amp = terms[0].amp if one else None
+        self.tau = terms[0].tau if one else None
+        self.Q = terms[0].Q if one else None
+        self.kernel = "sho" if self.is_simple() else "ss"
 
-    def __init__(self, amp, tau, err_scale=1.0):
-        amp, tau, err_scale = float(amp), float(tau), float(err_scale)
-        if not (amp > 0 and tau > 0 and err_scale > 0 and math.isfinite(amp + tau + err_scale)):
-            raise ValueError(f"GP: amp, tau and err_scale must be positive and finite, got {amp}, {tau}, {err_scale}")
-        self.amp, self.tau, self.err_scale = amp, tau, err_scale
+    def is_simple(self):
+        """one SHO term of Q = 1/sqrt(2), no baseline, one segment: the original model (its own compiled path)"""
+        return (len(self.terms) == 1 and isinstance(self.terms[0], SHO) and self.terms[0].Q == _Q0
+                and self.baseline is None and self.gap is None and not len(self.breaks))
 
     def __repr__(self):
-        return f"GP(amp={self.amp:.6g}, tau={self.tau:.6g}, err_scale={self.err_scale:.6g})"
+        if self.is_simple():
+            return f"GP(amp={self.amp:.6g}, tau={self.tau:.6g}, err_scale={self.err_scale:.6g})"
+        if len(self.terms) == 1 and isinstance(self.terms[0], SHO):
+            s = f"amp={self.amp:.6g}, tau={self.tau:.6g}, Q={self.Q:.6g}"
+        else:
+            s = "terms=[" + ", ".join(repr(x) for x in self.terms) + "]"
+        s += f", err_scale={self.err_scale:.6g}"
+        if self.baseline:
+            s += f", baseline={self.baseline!r}"
+        if self.gap is not None:
+            s += f", gap={self.gap:.6g}"
+        if len(self.breaks):
+            s += ", breaks=[" + ", ".join(f"{b:.10g}" for b in self.breaks) + "]"
+        return f"GP({s})"
 
     def key(self):
         """the hyperparameters as a tuple (data hashes, resume)"""
-        return (self.kernel, self.amp, self.tau, self.err_scale)
+        if self.is_simple():
+            return ("sho", self.amp, self.tau, self.err_scale)
+        return ("ss", tuple(x.key() for x in self.terms), self.err_scale, self.baseline,
+                self.baseline_sd if self.baseline else None, self.gap) + \
+            ((tuple(float(b) for b in self.breaks),) if len(self.breaks) else ())
+
+    def refit_options(self):
+        """GP.fit keyword arguments that refit a GP of this form (kernel, baseline, gap, baseline_sd, the rotation
+        period as the start), or None if no GP.fit kernel has this form (a hand-made sum of terms)"""
+        t = self.terms
+        o = dict(baseline=self.baseline, gap=self.gap, baseline_sd=self.baseline_sd)
+        if len(self.breaks):
+            o["breaks"] = self.breaks.copy()
+        if len(t) == 1 and isinstance(t[0], SHO):
+            return dict(o, kernel="sho" if t[0].Q == _Q0 else "sho_q")
+        if len(t) == 2 and all(isinstance(x, SHO) and x.Q == _Q0 for x in t):
+            return dict(o, kernel="sho2")
+        if len(t) == 2 and isinstance(t[0], Rotation) and isinstance(t[1], SHO) and t[1].Q == _Q0:
+            return dict(o, kernel="rotation", period=t[0].period)
+        return None
+
+    def blocks(self):
+        """the state-space blocks as arrays (kind 0 = SHO (amp, tau, Q), 1 = offset (sd), 2 = linear (sd, sd'))"""
+        kind, pa, pb, pc = [], [], [], []
+        for s in self.sho:
+            kind.append(0), pa.append(s.amp), pb.append(s.tau), pc.append(s.Q)
+        if self.baseline == "offset":
+            kind.append(1), pa.append(self.baseline_sd[0]), pb.append(0.0), pc.append(0.0)
+        elif self.baseline == "linear":
+            kind.append(2), pa.append(self.baseline_sd[0]), pb.append(self.baseline_sd[1]), pc.append(0.0)
+        return (np.array(kind, dtype=np.int64), np.array(pa, dtype=np.float64), np.array(pb, dtype=np.float64),
+                np.array(pc, dtype=np.float64))
+
+    def segment_starts(self, time):
+        """True at the first cadence of each segment (the first cadence, after every gap longer than gap, and the
+        first cadence at or after each break)"""
+        t = np.asarray(time, dtype=np.float64)
+        seg = np.zeros(len(t), dtype=np.bool_)
+        if len(t):
+            seg[0] = True
+        if self.gap is not None and len(t) > 1:
+            seg[1:] = np.diff(t) > self.gap
+        if len(self.breaks) and len(t) > 1:
+            i = np.searchsorted(t, self.breaks, side="left")
+            seg[i[(i > 0) & (i < len(t))]] = True
+        return seg
+
+    def setup(self, t, y1, valid, yerr):
+        """the tables of the likelihood at the ascending cadence times t, y1 = data - 1: (F, K, irs, e, W, v, H, c0,
+        ld) of gp_setup / gp_setup_ss with the horizons H (gp_horizon) after v"""
+        var = np.ascontiguousarray((self.err_scale * yerr) ** 2)
+        if self.is_simple():
+            F, K, irs, e, W, v, c0, ld = gp_setup(t, y1, var, valid, yerr, self.amp, self.tau)
+        else:
+            kind, pa, pb, pc = self.blocks()
+            F, K, irs, e, W, v, c0, ld = gp_setup_ss(t, y1, var, valid, yerr, kind, pa, pb, pc,
+                                                     self.segment_starts(t))
+        return F, K, irs, e, W, v, gp_horizon(F, K), c0, ld
 
     def loglike_noise(self, time, flux, yerr, mask=None):
         """log likelihood of the light curve under the GP alone (model flux 1 everywhere), relative to the white-noise
         normalisation as in Likelihood; points with mask True (or non-finite flux / yerr) are left out"""
         t, y1, yerr_, valid = _prepare(time, flux, yerr, mask)
-        var = (self.err_scale * yerr_) ** 2
-        tab = gp_setup(t, y1, var, valid, yerr_, self.amp, self.tau)
-        return -0.5 * tab[6] - tab[7]
+        tab = self.setup(t, y1, valid, yerr_)
+        return -0.5 * tab[-2] - tab[-1]
 
     @classmethod
     def fit(cls, time, flux, yerr, mask=None, err_scale=None, amp_bounds=None, tau_bounds=None, bin_width=10.0 / 1440,
-            n_starts=3):
+            n_starts=3, kernel="sho", baseline=None, gap=None, baseline_sd=(0.01, 0.01), period=None, clip=None,
+            breaks=None, steps=None):
         """Maximum-likelihood (type II) hyperparameters of the GP alone on the light curve (model flux 1), e.g. with
         the transit windows masked (mask True = left out). err_scale: a number to hold it fixed, or None to fit it
         (bounds 1/3 - 3). Bounds (defaults): amp from 0.02 to 50 x the median yerr, tau from the median time step to
         the time span. bin_width [d]: the fit uses data binned to this width if the median time step is shorter than
         half of it (None: never bin); as TLS's gp fit (fit_bin_width, 10 min).
-        As TLS 2.2's gradient fit of its baselines: the exact gradient of the Kalman likelihood (here forward mode in
-        (ln amp, ln tau, ln err_scale), about 4 likelihood evaluations), a bounded quasi-Newton (projected BFGS,
-        _minimize_bounded), transitions once per distinct time step (time_table), from n_starts values of tau.
+
+        kernel: "sho" (one SHO term, Q = 1/sqrt(2); the default), "sho_q" (one SHO term with its Q fitted, 0.2 - 50),
+        "sho2" (two SHO terms of Q = 1/sqrt(2): e.g. a slow trend plus granulation), "rotation" (Rotation + one SHO
+        term for granulation; period: a starting rotation period [d], or None: the three highest peaks of a
+        Lomb-Scargle periodogram of the data). baseline, gap, baseline_sd: as in GP (held, not fitted).
+        clip: None, or (upper, lower[, single]) [sigma] (True: (4, 5, True)): iterate the fit with flag_outliers
+        (flares above upper sigma everywhere, outliers below lower sigma outside mask, and with single: isolated
+        single-cadence points below lower sigma also inside mask) masked; the flagged points are returned as the GP's
+        outliers (a boolean array over the input points; set those fluxes to NaN for the Likelihood).
+        breaks: segment starts with a free offset (see GP; needs a baseline). steps: None, or True / a dict of
+        find_steps options (mask: where not to search, default `mask`; min_dlnl, min_sep, ...): after the fit (and
+        clipping), find flux steps under the fitted GP, then refit with a break at each; the GP's `steps` lists them
+        (GPU_LOG Round 9.6: a Kepler flux step next to a transit made a false moon candidate).
+
+        "sho" without baseline and gap: as TLS 2.2's gradient fit of its baselines: the exact gradient of the Kalman
+        likelihood (forward mode in (ln amp, ln tau, ln err_scale)), a bounded quasi-Newton (projected BFGS,
+        _minimize_bounded), transitions once per distinct time step (time_table), from n_starts values of tau. The
+        other kernels: the same optimiser on the general state-space likelihood with central-difference gradients.
         Returns a GP with fit_nll (the minimum), fit_nfev and fit_points (after binning)."""
+        if kernel not in KERNELS:
+            raise ValueError(f"GP.fit: kernel must be one of {KERNELS}, got {kernel!r}")
+        opts = dict(err_scale=err_scale, amp_bounds=amp_bounds, tau_bounds=tau_bounds, bin_width=bin_width,
+                    n_starts=n_starts, kernel=kernel, baseline=baseline, gap=gap, baseline_sd=baseline_sd,
+                    period=period, breaks=breaks)
+        if steps:
+            if baseline is None:
+                raise ValueError("GP.fit(steps=...) needs a baseline (\"offset\" or \"linear\")")
+            so = dict(steps) if isinstance(steps, dict) else {}
+            smask = so.pop("mask", mask)
+            g = cls.fit(time, flux, yerr, mask=mask, clip=clip, **opts)
+            out = getattr(g, "outliers", np.zeros(len(np.asarray(time)), dtype=bool))
+            f2 = np.where(out, np.nan, np.asarray(flux, dtype=np.float64))
+            st = g.find_steps(time, f2, yerr, mask=smask, **so)
+            if len(st):
+                opts["breaks"] = np.concatenate([np.asarray([] if breaks is None else breaks, float), st])
+                g = cls.fit(time, flux, yerr, mask=mask, clip=clip, **opts)
+            g.steps = np.asarray(st, dtype=np.float64)
+            return g
+        if clip is None or clip is False:
+            return cls._fit(time, flux, yerr, mask, **opts)
+        if clip is True:
+            upper, lower, single = 4.0, 5.0, True
+        else:
+            upper, lower = float(clip[0]), float(clip[1])
+            single = bool(clip[2]) if len(clip) > 2 else True
+        m0 = np.zeros(len(np.asarray(time)), dtype=bool) if mask is None else np.asarray(mask, dtype=bool)
+        out = np.zeros_like(m0)
+        for _ in range(5):
+            g = cls._fit(time, flux, yerr, m0 | out, **opts)
+            new = out | g.flag_outliers(time, flux, yerr, mask=m0 | out, upper=upper, lower=lower, inside=m0,
+                                        single=single)
+            if np.array_equal(new, out):
+                break
+            out = new
+        g.outliers = out
+        return g
+
+    @classmethod
+    def _fit(cls, time, flux, yerr, mask, err_scale, amp_bounds, tau_bounds, bin_width, n_starts, kernel, baseline,
+             gap, baseline_sd, period, breaks=None):
         t, y1, yerr_, valid = _prepare(time, flux, yerr, mask)
         t, y1, yerr_ = t[valid], y1[valid], yerr_[valid]
         if len(t) < 10:
@@ -97,49 +358,177 @@ class GP(object):
         alo, ahi = amp_bounds or (0.02 * ye, 50.0 * ye)
         tlo, thi = tau_bounds or (dt_med, span)
         fit_s = err_scale is None
-        lo = np.array([math.log(alo), math.log(tlo)] + ([math.log(1.0 / 3.0)] if fit_s else []))
-        hi = np.array([math.log(ahi), math.log(thi)] + ([math.log(3.0)] if fit_s else []))
-        idx, steps = time_table(t, 1e-6)
         var0 = np.ascontiguousarray(yerr_ * yerr_)
         s_fix = 1.0 if fit_s else float(err_scale)
-        nfev = [0]
-
-        def fg(z):
-            nfev[0] += 1
-            s = math.exp(z[2]) if fit_s else s_fix
-            f, g = _nll_grad(idx, steps, y1, var0 * s * s, yerr_, math.exp(z[0]), math.exp(z[1]))
-            return f, (g if fit_s else g[:2])
-
         rms = float(np.std(y1))
         a0 = math.log(min(max(math.sqrt(max(rms * rms - ye * ye, (0.1 * ye) ** 2)), alo * 1.01), ahi / 1.01))
-        best = None
-        for j in range(n_starts):
-            t0 = math.log(min(max(dt_med * 10.0 ** (1 + j), tlo * 1.01), thi / 1.01))
-            z0 = np.array([a0, t0] + ([0.0] if fit_s else []))
-            z, f = _minimize_bounded(fg, z0, lo, hi)
-            if best is None or f < best[1]:
-                best = (z, f)
-        z = best[0]
-        g = cls(math.exp(z[0]), math.exp(z[1]), math.exp(z[2]) if fit_s else s_fix)
-        g.fit_nll, g.fit_nfev, g.fit_points = float(best[1]), int(nfev[0]), int(len(t))
-        return g
+        if breaks is not None and len(breaks) and baseline is None:
+            raise ValueError("GP.fit: breaks need a baseline")
+        if kernel == "sho" and baseline is None and gap is None:
+            idx, steps = time_table(t, 1e-6)
+            lo = np.array([math.log(alo), math.log(tlo)] + ([math.log(1.0 / 3.0)] if fit_s else []))
+            hi = np.array([math.log(ahi), math.log(thi)] + ([math.log(3.0)] if fit_s else []))
+            nfev = [0]
+
+            def fg(z):
+                nfev[0] += 1
+                s = math.exp(z[2]) if fit_s else s_fix
+                f, g = _nll_grad(idx, steps, y1, var0 * s * s, yerr_, math.exp(z[0]), math.exp(z[1]))
+                return f, (g if fit_s else g[:2])
+
+            best = None
+            for j in range(n_starts):
+                t0 = math.log(min(max(dt_med * 10.0 ** (1 + j), tlo * 1.01), thi / 1.01))
+                z0 = np.array([a0, t0] + ([0.0] if fit_s else []))
+                z, f = _minimize_bounded(fg, z0, lo, hi)
+                if best is None or f < best[1]:
+                    best = (z, f)
+            z = best[0]
+            g = cls(math.exp(z[0]), math.exp(z[1]), math.exp(z[2]) if fit_s else s_fix)
+            g.fit_nll, g.fit_nfev, g.fit_points = float(best[1]), int(nfev[0]), int(len(t))
+            return g
+        return _fit_general(cls, t, y1, yerr_, var0, kernel, fit_s, s_fix, baseline, gap, baseline_sd, n_starts,
+                            period, a0, (alo, ahi), (tlo, thi), dt_med, span, breaks)
 
     def sample(self, time, rng=None):
-        """a random draw of the GP (the correlated part only, without the white noise) at the ascending times, e.g.
-        to simulate stellar variability or for injection tests (exact state-space simulation)"""
+        """a random draw of the GP (the correlated part only: the SHO terms, without the baseline and the white
+        noise) at the ascending times, e.g. to simulate stellar variability or for injection tests (exact
+        state-space simulation; independent segments after gaps longer than gap)"""
         rng = np.random.default_rng(rng)
         t = np.asarray(time, dtype=np.float64)
         if len(t) > 1 and not np.all(np.diff(t) >= 0):
             raise ValueError("GP.sample needs ascending times")
-        z = rng.standard_normal((len(t), 2))
-        return _sho_sample(t, self.amp, self.tau, z)
+        if self.is_simple():
+            z = rng.standard_normal((len(t), 2))
+            return _sho_sample(t, self.amp, self.tau, z)
+        seg = self.segment_starts(t)
+        out = np.zeros(len(t))
+        for s in self.sho:
+            out += _sho_sample_q(t, s.amp, s.tau, s.Q, rng.standard_normal((len(t), 2)), seg)
+        return out
 
     def predict(self, time, residual, yerr, mask=None):
-        """posterior mean and sd of the GP at the given (ascending) times, given residual = data - model there
-        (Kalman filter + Rauch-Tung-Striebel smoother; mask True = left out): the trend to subtract for plots"""
+        """posterior mean and sd of the GP (with the baseline, if any) at the given (ascending) times, given
+        residual = data - model there (Kalman filter + Rauch-Tung-Striebel smoother; mask True = left out): the
+        trend to subtract for plots"""
         t, r, yerr_, valid = _prepare(time, np.asarray(residual, dtype=np.float64) + 1.0, yerr, mask)
-        mean, var = _rts(t, r, (self.err_scale * yerr_) ** 2, valid, self.amp, self.tau)
+        var_w = (self.err_scale * yerr_) ** 2
+        if self.is_simple():
+            mean, var = _rts(t, r, var_w, valid, self.amp, self.tau)
+        else:
+            kind, pa, pb, pc = self.blocks()
+            mean, var = _rts_ss(t, r, var_w, valid, kind, pa, pb, pc, self.segment_starts(t))
         return mean, np.sqrt(np.maximum(var, 0.0))
+
+    def flag_outliers(self, time, flux, yerr, mask=None, upper=4.0, lower=5.0, inside=None, max_iter=100, sep=3,
+                      single=False, iso=2.0):
+        """Flares and outliers under this GP: points whose leave-one-out residual (the residual from the GP's
+        prediction given all other points; (r - mean) / sqrt(s^2 yerr^2 - var) for a point in the fit, the exact LOO
+        identity of the smoother) is above upper sigma (flares: everywhere, also inside the transit windows: above
+        the trend, which a transit cannot produce) or below -lower sigma (outside `inside`, e.g. the transit
+        windows, where dips are the signal). Iterated, peak first: each pass flags the candidates whose |z| is the
+        largest within sep cadences (the neighbours of a flare's peak look low while the peak pulls the prediction
+        up), leaves them out of the prediction, and repeats until no point is added (flares of many cadences).
+        mask: points left out of the prediction from the start (e.g. the transit windows); inside: where only the
+        upper test applies (default: mask). single: inside too, flag isolated single cadences more than lower sigma
+        (white noise) below the mean of their two neighbours (within 1.5 median time steps), the neighbours within
+        iso sigma of each other: a transit or a moon dip lasts many cadences, a one-cadence dip is an artefact
+        (GPU_LOG Round 9.6). Returns a boolean array (True = flagged)."""
+        t, y1, yerr_, ok = _prepare(time, flux, yerr, None)
+        n = len(t)
+        m0 = np.zeros(n, dtype=bool) if mask is None else np.asarray(mask, dtype=bool)
+        ins = m0 if inside is None else np.asarray(inside, dtype=bool)
+        var_w = (self.err_scale * yerr_) ** 2
+        out = np.zeros(n, dtype=bool)
+        for _ in range(max_iter):
+            use = ok & ~m0 & ~out
+            mean, sd = self.predict(t, y1, yerr_, mask=~use)
+            r = y1 - mean
+            v = sd * sd
+            z = np.where(use, r / np.sqrt(np.maximum(var_w - v, 1e-6 * var_w)), r / np.sqrt(var_w + v))
+            cand = ok & ~out & ((z > upper) | (~ins & (z < -lower)))
+            if not cand.any():
+                break
+            a = np.where(cand, np.abs(z), 0.0)
+            peak = a.copy()
+            for k in range(1, int(sep) + 1):
+                peak[k:] = np.maximum(peak[k:], a[:-k])
+                peak[:-k] = np.maximum(peak[:-k], a[k:])
+            out = out | (cand & (a >= peak))
+        if single and n > 2:
+            # inside: a local test (the GP prediction is an extrapolation there): the cadence below the mean of its
+            # two neighbours by > lower sigma (white noise), and the neighbours at the same level (< iso sigma
+            # apart: not an ingress / egress corner)
+            sw = np.sqrt(var_w)
+            lim = 1.5 * float(np.median(np.diff(t)))
+            nb = np.zeros(n, dtype=bool)
+            nb[1:-1] = ok[:-2] & ok[2:] & (t[1:-1] - t[:-2] <= lim) & (t[2:] - t[1:-1] <= lim)
+            d = np.zeros(n)
+            sep2 = np.full(n, np.inf)
+            d[1:-1] = (y1[1:-1] - 0.5 * (y1[:-2] + y1[2:])) / (sw[1:-1] * math.sqrt(1.5))
+            sep2[1:-1] = np.abs(y1[:-2] - y1[2:]) / (sw[1:-1] * math.sqrt(2.0))
+            out = out | (ok & ins & nb & (d < -lower) & (sep2 < iso))
+        return out
+
+
+    def find_steps(self, time, flux, yerr, mask=None, min_dlnl=10.0, min_sep=0.5, max_steps=20, w=6, z_pre=4.0,
+                   n_cand=40):
+        """Flux steps (sudden level changes, e.g. Kepler sudden pixel sensitivity dropouts) under this GP: break times
+        [d] where a free offset raises the GP's marginal likelihood (loglike_noise, the offsets marginalised with
+        their wide prior: the Occam factor of the extra offset is included) by more than min_dlnl.
+        Candidates: boundaries where the mean of the next w points minus the mean of the previous w points (both
+        windows contiguous, within one segment, outside mask) is > z_pre robust sd of that statistic over the light
+        curve (local maxima, at most n_cand). Greedy: the best candidate is added while its gain is > min_dlnl, up to
+        max_steps; candidates within min_sep [d] of an accepted break are dropped, so that two breaks cannot carve
+        out a dip (a moon's dip lasts about a transit duration: give min_sep >= 2 T14 for a moon search).
+        mask: points left out (e.g. the planet's transits; steps inside them cannot be told from the transit).
+        Needs a baseline. Returns the break times (ascending; empty array if none)."""
+        if self.baseline is None:
+            raise ValueError("find_steps needs a GP with a baseline (offset or linear)")
+        t, y1, yerr_, valid = _prepare(time, flux, yerr, mask)
+        idx = np.where(valid)[0]
+        n = len(idx)
+        if n < 4 * w:
+            return np.zeros(0)
+        tv, yv = t[idx], y1[idx]
+        dt_med = float(np.median(np.diff(tv)))
+        seg = self.segment_starts(t)[idx]
+        segid = np.cumsum(seg)
+        c = np.concatenate([[0.0], np.cumsum(yv)])
+        i = np.arange(w, n - w + 1)
+        D = (c[i + w] - c[i]) / w - (c[i] - c[i - w]) / w
+        okw = (tv[np.minimum(i + w - 1, n - 1)] - tv[i - w] <= 1.5 * (2 * w) * dt_med) & \
+            (segid[np.minimum(i + w - 1, n - 1)] == segid[i - w])
+        i, D = i[okw], D[okw]
+        if len(D) < 10:
+            return np.zeros(0)
+        sd = 1.4826 * float(np.median(np.abs(D - np.median(D))))
+        z = np.abs(D) / max(sd, 1e-300)
+        loc = np.ones(len(z), dtype=bool)
+        for k in range(1, w + 1):
+            loc[k:] &= z[k:] >= z[:-k]
+            loc[:-k] &= z[:-k] >= z[k:]
+        pick = np.where(loc & (z > z_pre))[0]
+        pick = pick[np.argsort(-z[pick])][:int(n_cand)]
+        cand = [0.5 * (tv[i[j] - 1] + tv[i[j]]) for j in pick]
+        if not cand:
+            return np.zeros(0)
+        opts = dict(terms=self.terms, err_scale=self.err_scale, baseline=self.baseline, gap=self.gap,
+                    baseline_sd=self.baseline_sd)
+        acc = list(self.breaks)
+        base = type(self)(breaks=acc, **opts).loglike_noise(time, flux, yerr, mask)
+        found = []
+        while cand and len(found) < max_steps:
+            gains = [type(self)(breaks=acc + [b], **opts).loglike_noise(time, flux, yerr, mask) - base for b in cand]
+            j = int(np.argmax(gains))
+            if gains[j] <= min_dlnl:
+                break
+            b = cand[j]
+            acc.append(b)
+            found.append(b)
+            base += gains[j]
+            cand = [x for x in cand if abs(x - b) >= min_sep]
+        return np.sort(np.asarray(found, dtype=np.float64))
 
 
 def _prepare(time, flux, yerr, mask):
@@ -409,6 +798,521 @@ def _sho_step(x, s2):
             s2 * (em - e2 * 2.0 * sn * (sn - c)))
 
 
+# --------------------------------------------------------------------------------------------------------------------
+# General state-space model (GP(terms=..., baseline=..., gap=...)): blocks of SHO terms (any Q) and a baseline, in
+# coordinates z = T m with z_0 = h . m the observed sum (T = I with its row 0 replaced by h; h_0 = 1, the first block
+# is always an SHO term). The tables have the layout of gp_setup's for any d: F (n, d*d) row-major, K (n, d), irs, e,
+# W (n, d (d+1) / 2) the upper triangle row-major, v (n, d); d = 2 is the single-SHO layout.
+# --------------------------------------------------------------------------------------------------------------------
+
+@jit(cache=True, nopython=True)
+def _sho_trans(dt, tau, Q, s2):
+    """transition (f00, f01, f10, f11) and process noise (q00, q01, q11) of an SHO block of quality Q over the step
+    dt (state (g, g' tau), stationary covariance s2 I): F = exp(A dt) in closed form, Q = s2 (I - F F'), written
+    without the cancellation of 1 - e^-2zs; Q = 1/sqrt(2): _sho_step (the same closed form as the single SHO)"""
+    if Q == _Q0:
+        return _sho_step(dt / (1.4142135623730951 * tau), s2)
+    s = dt / tau
+    z = 0.5 / Q
+    if z < 1.0:
+        eta = math.sqrt(1.0 - z * z)
+        E = math.exp(-z * s)
+        EC = E * math.cos(eta * s)
+        ES = E * math.sin(eta * s) / eta
+    elif z == 1.0:
+        E = math.exp(-s)
+        EC = E
+        ES = E * s
+    else:
+        eta = math.sqrt(z * z - 1.0)
+        a = math.exp(-(z - eta) * s)
+        b = math.exp(-(z + eta) * s)
+        EC = 0.5 * (a + b)
+        ES = -0.5 * a * math.expm1(-2.0 * eta * s) / eta
+    em = -math.expm1(-2.0 * z * s)
+    return (EC + z * ES, ES, -ES, EC - z * ES,
+            s2 * (em - 2.0 * z * ES * (z * ES + EC)), s2 * (2.0 * z * ES * ES), s2 * (em - 2.0 * z * ES * (z * ES - EC)))
+
+
+@jit(cache=True, nopython=True)
+def _ss_dim(kind):
+    d = 0
+    for k in kind:
+        d += 1 if k == 1 else 2
+    return d
+
+
+@jit(cache=True, nopython=True)
+def _ss_mats(kind, pa, pb, pc, dt, F, Qm):
+    """transition F and process noise Qm (d x d, original coordinates) of the blocks over the step dt"""
+    F[:, :] = 0.0
+    Qm[:, :] = 0.0
+    o = 0
+    for b in range(kind.shape[0]):
+        if kind[b] == 0:
+            f00, f01, f10, f11, q00, q01, q11 = _sho_trans(dt, pb[b], pc[b], pa[b] * pa[b])
+            F[o, o] = f00
+            F[o, o + 1] = f01
+            F[o + 1, o] = f10
+            F[o + 1, o + 1] = f11
+            Qm[o, o] = q00
+            Qm[o, o + 1] = q01
+            Qm[o + 1, o] = q01
+            Qm[o + 1, o + 1] = q11
+            o += 2
+        elif kind[b] == 1:
+            F[o, o] = 1.0
+            o += 1
+        else:
+            F[o, o] = 1.0
+            F[o, o + 1] = dt
+            F[o + 1, o + 1] = 1.0
+            o += 2
+
+
+@jit(cache=True, nopython=True)
+def _ss_prior(kind, pa, pb, d):
+    """the state's prior covariance at a segment start (the SHO terms stationary) and the observation vector h"""
+    P0 = np.zeros((d, d))
+    h = np.zeros(d)
+    o = 0
+    for b in range(kind.shape[0]):
+        if kind[b] == 0:
+            P0[o, o] = pa[b] * pa[b]
+            P0[o + 1, o + 1] = pa[b] * pa[b]
+            h[o] = 1.0
+            o += 2
+        elif kind[b] == 1:
+            P0[o, o] = pa[b] * pa[b]
+            h[o] = 1.0
+            o += 1
+        else:
+            P0[o, o] = pa[b] * pa[b]
+            P0[o + 1, o + 1] = pb[b] * pb[b]
+            h[o] = 1.0
+            o += 2
+    return P0, h
+
+
+@jit(cache=True, nopython=True)
+def _ss_zmats(kind, pa, pb, pc, steps, d):
+    """per distinct step: the transition and process noise in the z coordinates (Fz (nu, d, d), Qz), and the prior
+    P0z: z = T m, T = I with row 0 = h, T^-1 = I with row 0 = 2 e_0 - h"""
+    P0, h = _ss_prior(kind, pa, pb, d)
+    T = np.eye(d)
+    Ti = np.eye(d)
+    for j in range(d):
+        T[0, j] = h[j]
+        Ti[0, j] = -h[j]
+    Ti[0, 0] = 1.0
+    nu = steps.shape[0]
+    Fz = np.empty((nu, d, d))
+    Qz = np.empty((nu, d, d))
+    F = np.empty((d, d))
+    Qm = np.empty((d, d))
+    for u in range(nu):
+        _ss_mats(kind, pa, pb, pc, steps[u], F, Qm)
+        Fz[u] = T @ F @ Ti
+        Qz[u] = T @ Qm @ T.T
+    return Fz, Qz, T @ P0 @ T.T
+
+
+@jit(cache=True, nopython=True)
+def _ss_filter(t, y1, var, valid, yerr, kind, pa, pb, pc, seg, tables):
+    """the Kalman filter of the data under the general model (z coordinates, z_0 observed): c0 = |e|^2 and ld as
+    in gp_setup, and (tables) F (n, d*d), K (n, d), irs, e (F row 0 and every segment start: 0)"""
+    n = t.shape[0]
+    d = _ss_dim(kind)
+    tidx, steps = time_table(t, 1e-6)
+    Fz, Qz, P0z = _ss_zmats(kind, pa, pb, pc, steps, d)
+    nt = n if tables else 0
+    F = np.zeros((nt, d * d))
+    K = np.zeros((nt, d))
+    irs = np.zeros(nt)
+    e = np.zeros(nt)
+    m = np.zeros(d)
+    P = np.zeros((d, d))
+    row = np.zeros(d)
+    c0 = 0.0
+    ld = 0.0
+    for i in range(n):
+        if seg[i]:
+            m[:] = 0.0
+            P[:, :] = P0z
+        else:
+            Fi = Fz[tidx[i]]
+            m = Fi @ m
+            P = Fi @ P @ Fi.T + Qz[tidx[i]]
+            if tables:
+                for a in range(d):
+                    for b in range(d):
+                        F[i, a * d + b] = Fi[a, b]
+        if not valid[i]:
+            continue
+        S = P[0, 0] + var[i]
+        rs = math.sqrt(S)
+        inn = y1[i] - m[0]
+        ei = inn / rs
+        c0 += ei * ei
+        ld += math.log(rs) - math.log(yerr[i])
+        for a in range(d):
+            row[a] = P[0, a]
+        for a in range(d):
+            k = row[a] / S
+            m[a] += k * inn
+            for b in range(d):
+                P[a, b] -= k * row[b]
+            if tables:
+                K[i, a] = k
+        for a in range(d):
+            for b in range(a + 1, d):
+                x = 0.5 * (P[a, b] + P[b, a])
+                P[a, b] = x
+                P[b, a] = x
+        if tables:
+            irs[i] = 1.0 / rs
+            e[i] = ei
+    return F, K, irs, e, c0, ld
+
+
+@jit(cache=True, nopython=True)
+def _ss_nll(t, y1, var, yerr, kind, pa, pb, pc, seg):
+    """negative log likelihood of y1 (all points used) under the general model, normalised as _nll_grad"""
+    valid = np.ones(t.shape[0], dtype=np.bool_)
+    _F, _K, _i, _e, c0, ld = _ss_filter(t, y1, var, valid, yerr, kind, pa, pb, pc, seg, False)
+    return 0.5 * c0 + ld
+
+
+@jit(cache=True, nopython=True)
+def gp_setup_ss(t, y1, var, valid, yerr, kind, pa, pb, pc, seg):
+    """gp_setup for the general model (blocks kind, pa, pb, pc; seg: True at segment starts): the same tables, d
+    states (module comment above), and the zero-input tails W_k = g g' + A' W_(k+1) A, v_k = e_(k+1) g + A' v_(k+1)
+    with g = -irs_(k+1) F_(k+1)[0, :] and A = F_(k+1) - K_(k+1) F_(k+1)[0, :]"""
+    F, K, irs, e, c0, ld = _ss_filter(t, y1, var, valid, yerr, kind, pa, pb, pc, seg, True)
+    n = t.shape[0]
+    d = K.shape[1]
+    nw = d * (d + 1) // 2
+    W = np.zeros((n, nw))
+    v = np.zeros((n, d))
+    Wm = np.zeros((d, d))
+    vv = np.zeros(d)
+    A = np.empty((d, d))
+    g = np.empty(d)
+    for i in range(n - 2, -1, -1):
+        j = i + 1
+        for a in range(d):
+            g[a] = -irs[j] * F[j, a]
+        for a in range(d):
+            for b in range(d):
+                A[a, b] = F[j, a * d + b] - K[j, a] * F[j, b]
+        Wm = A.T @ Wm @ A
+        vv = A.T @ vv
+        for a in range(d):
+            vv[a] += e[j] * g[a]
+            for b in range(d):
+                Wm[a, b] += g[a] * g[b]
+        q = 0
+        for a in range(d):
+            for b in range(a, d):
+                W[i, q] = 0.5 * (Wm[a, b] + Wm[b, a])
+                q += 1
+            v[i, a] = vv[a]
+    return F, K, irs, e, W, v, c0, ld
+
+
+@jit(cache=True, nopython=True, fastmath=True)
+def _gp_quad_ss(out_idx, Dv, F, K, irs, e, W, v, H):
+    """gp_quad with d states (K.shape[1])"""
+    nk = out_idx.shape[0]
+    if nk == 0:
+        return 0.0
+    d = K.shape[1]
+    m = np.zeros(d)
+    mn = np.zeros(d)
+    acc = 0.0
+    c = out_idx[0]
+    start = c
+    k = 0
+    while True:
+        if c > start:
+            for a in range(d):
+                x = 0.0
+                for b in range(d):
+                    x += F[c, a * d + b] * m[b]
+                mn[a] = x
+            for a in range(d):
+                m[a] = mn[a]
+        dd = 0.0
+        if out_idx[k] == c:
+            dd = Dv[k]
+            k += 1
+        inn = dd - m[0]
+        dw = inn * irs[c]
+        acc += dw * (dw + 2.0 * e[c])
+        for a in range(d):
+            m[a] += K[c, a] * inn
+        if k == nk:
+            break
+        s = out_idx[k]
+        if s - c > H[c]:
+            # the gap to the next window cadence is longer than the horizon: the tail of the decaying state, then
+            # the next window from state 0
+            acc += _tail_ss(W, v, c, m)
+            for a in range(d):
+                m[a] = 0.0
+            c = s
+            start = s
+        else:
+            c += 1
+    return acc + _tail_ss(W, v, c, m)
+
+
+@jit(cache=True, nopython=True, fastmath=True)
+def _tail_ss(W, v, c, m):
+    """the zero-input tail after cadence c of the filtered D-state m: m' W_c m + 2 v_c' m"""
+    d = m.shape[0]
+    acc = 0.0
+    q = 0
+    for a in range(d):
+        acc += 2.0 * v[c, a] * m[a]
+        for b in range(a, d):
+            acc += (1.0 if a == b else 2.0) * W[c, q] * m[a] * m[b]
+            q += 1
+    return acc
+
+
+@jit(cache=True, nopython=True)
+def _whiten_deficit_ss(Dfull, F, K, irs):
+    n = Dfull.shape[0]
+    d = K.shape[1]
+    out = np.zeros(n)
+    m = np.zeros(d)
+    mn = np.zeros(d)
+    for c in range(n):
+        if c > 0:
+            for a in range(d):
+                x = 0.0
+                for b in range(d):
+                    x += F[c, a * d + b] * m[b]
+                mn[a] = x
+            for a in range(d):
+                m[a] = mn[a]
+        inn = Dfull[c] - m[0]
+        out[c] = inn * irs[c]
+        for a in range(d):
+            m[a] += K[c, a] * inn
+    return out
+
+
+@jit(cache=True, nopython=True)
+def _rts_ss(t, r, var, valid, kind, pa, pb, pc, seg):
+    """_rts for the general model: posterior mean and variance of z_0 (the GP terms plus the baseline)"""
+    n = t.shape[0]
+    d = _ss_dim(kind)
+    tidx, steps = time_table(t, 1e-6)
+    Fz, Qz, P0z = _ss_zmats(kind, pa, pb, pc, steps, d)
+    mf = np.zeros((n, d))
+    mp = np.zeros((n, d))
+    Pf = np.zeros((n, d, d))
+    Pp = np.zeros((n, d, d))
+    m = np.zeros(d)
+    P = np.zeros((d, d))
+    for i in range(n):
+        if seg[i]:
+            m = np.zeros(d)
+            P = P0z.copy()
+        else:
+            Fi = Fz[tidx[i]]
+            m = Fi @ m
+            P = Fi @ P @ Fi.T + Qz[tidx[i]]
+        mp[i] = m
+        Pp[i] = P
+        if valid[i]:
+            S = P[0, 0] + var[i]
+            k = P[:, 0] / S
+            inn = r[i] - m[0]
+            m = m + k * inn
+            P = P - np.outer(k, P[0, :])
+            P = 0.5 * (P + P.T)
+        mf[i] = m
+        Pf[i] = P
+    mean = np.zeros(n)
+    vv = np.zeros(n)
+    ms = mf[n - 1].copy()
+    Ps = Pf[n - 1].copy()
+    mean[n - 1], vv[n - 1] = ms[0], Ps[0, 0]
+    for i in range(n - 2, -1, -1):
+        if seg[i + 1]:
+            ms = mf[i].copy()
+            Ps = Pf[i].copy()
+        else:
+            Fn = Fz[tidx[i + 1]]
+            G = np.linalg.solve(Pp[i + 1], Fn @ Pf[i]).T
+            ms = mf[i] + G @ (ms - mp[i + 1])
+            Ps = Pf[i] + G @ (Ps - Pp[i + 1]) @ G.T
+        mean[i], vv[i] = ms[0], Ps[0, 0]
+    return mean, vv
+
+
+@jit(cache=True, nopython=True)
+def _sho_sample_q(t, amp, tau, Q, z, seg):
+    """GP.sample for one SHO term of quality Q: the exact transition and process noise per step, restarting from
+    the stationary distribution at the segment starts"""
+    n = t.shape[0]
+    out = np.empty(n)
+    s2 = amp * amp
+    x0 = 0.0
+    x1 = 0.0
+    for i in range(n):
+        if seg[i]:
+            x0 = amp * z[i, 0]
+            x1 = amp * z[i, 1]
+        else:
+            f00, f01, f10, f11, q00, q01, q11 = _sho_trans(t[i] - t[i - 1], tau, Q, s2)
+            y0 = f00 * x0 + f01 * x1
+            y1 = f10 * x0 + f11 * x1
+            l00 = math.sqrt(max(q00, 0.0))
+            l10 = q01 / l00 if l00 > 0 else 0.0
+            l11 = math.sqrt(max(q11 - l10 * l10, 0.0))
+            x0 = y0 + l00 * z[i, 0]
+            x1 = y1 + l10 * z[i, 0] + l11 * z[i, 1]
+        out[i] = x0
+    return out
+
+
+@jit(cache=True, nopython=True)
+def chunk_maps(Fm, Km, h, C):
+    """products of the D-filter's maps A_c = (I - K_c h') F_c (blocks' coordinates, Fm (n, d, d), Km (n, d)) over the
+    cadences j C ... (j + 1) C - 1 (the GPU's pass 1 for d > 2 states)"""
+    n, d = Km.shape
+    nch = (n + C - 1) // C
+    out = np.zeros((nch, d, d))
+    A = np.empty((d, d))
+    hf = np.empty(d)
+    for j in range(nch):
+        M = np.eye(d)
+        for c in range(j * C, min(n, (j + 1) * C)):
+            for b in range(d):
+                x = 0.0
+                for k in range(d):
+                    x += h[k] * Fm[c, k, b]
+                hf[b] = x
+            for a in range(d):
+                for b in range(d):
+                    A[a, b] = Fm[c, a, b] - Km[c, a] * hf[b]
+            M = A @ M
+        out[j] = M
+    return out
+
+
+def _lomb_scargle_peaks(t, y, pmin, pmax, npk=3):
+    """periods of the highest peaks of the classical Lomb-Scargle periodogram (floating mean) of y(t), pmin - pmax
+    [d] (local maxima, at least 20 % apart in period)"""
+    span = float(t[-1] - t[0])
+    fmin, fmax = 1.0 / pmax, 1.0 / pmin
+    nf = int(min(20000, max(200, 5 * span * (fmax - fmin))))
+    f = np.linspace(fmin, fmax, nf)
+    y = y - y.mean()
+    pw = np.empty(nf)
+    for a in range(0, nf, 256):
+        w = 2 * np.pi * f[a:a + 256, None]
+        tau = np.arctan2(np.sum(np.sin(2 * w * t), 1), np.sum(np.cos(2 * w * t), 1)) / (2 * w[:, 0])
+        arg = w * (t - tau[:, None])
+        c, s = np.cos(arg), np.sin(arg)
+        pw[a:a + 256] = (c @ y) ** 2 / np.sum(c * c, 1) + (s @ y) ** 2 / np.sum(s * s, 1)
+    loc = np.where((pw[1:-1] >= pw[:-2]) & (pw[1:-1] >= pw[2:]))[0] + 1
+    out = []
+    for i in loc[np.argsort(pw[loc])[::-1]]:
+        p = 1.0 / f[i]
+        if all(abs(p / q - 1) > 0.2 for q in out):
+            out.append(p)
+        if len(out) == npk:
+            break
+    return out
+
+
+def _fit_general(cls, t, y1, yerr_, var0, kernel, fit_s, s_fix, baseline, gap, baseline_sd, n_starts, period, a0,
+                 ab, tb, dt_med, span, breaks=None):
+    """GP.fit for the general kernels: ML hyperparameters (log space, bounds) with central-difference gradients
+    and _minimize_bounded, from several starts"""
+    seg = cls(1.0, 1.0, gap=gap, baseline=baseline, breaks=breaks).segment_starts(t)
+    lA = (math.log(ab[0]), math.log(ab[1]))
+    lT = (math.log(tb[0]), math.log(tb[1]))
+
+    def clipz(x, b):
+        return min(max(x, b[0] + 1e-3), b[1] - 1e-3)
+
+    if kernel == "sho":
+        bounds = [lA, lT]
+        build = lambda z: [SHO(math.exp(z[0]), math.exp(z[1]))]                                    # noqa: E731
+        starts = [[a0, clipz(math.log(dt_med * 10.0 ** (1 + j)), lT)] for j in range(n_starts)]
+    elif kernel == "sho_q":
+        bounds = [lA, lT, (math.log(0.2), math.log(50.0))]
+        build = lambda z: [SHO(math.exp(z[0]), math.exp(z[1]), math.exp(z[2]))]                   # noqa: E731
+        starts = [[a0, clipz(math.log(dt_med * 10.0 ** (1 + j)), lT), math.log(_Q0)] for j in range(n_starts)]
+    elif kernel == "sho2":
+        bounds = [lA, lT, lA, lT]
+        build = lambda z: [SHO(math.exp(z[0]), math.exp(z[1])), SHO(math.exp(z[2]), math.exp(z[3]))]  # noqa: E731
+        starts = []
+        for j in range(n_starts):
+            tl = clipz(math.log(span / (5.0 * 3.0 ** j)), lT)
+            ts = clipz(math.log(dt_med * 5.0 * 3.0 ** j), lT)
+            starts.append([clipz(a0 - 0.35, lA), tl, clipz(a0 - 1.0, lA), min(ts, tl - 1.0)])
+    else:
+        pmin, pmax = max(5.0 * dt_med, 0.05), span / 1.2
+        if pmax <= pmin:
+            raise ValueError("GP.fit(kernel='rotation'): the data span too short a time")
+        bounds = [lA, (math.log(pmin), math.log(pmax)), (math.log(0.01), math.log(50.0)),
+                  (math.log(1e-3), math.log(100.0)), (math.log(0.01), 0.0), lA, lT]
+
+        def build(z):
+            return [Rotation(math.exp(z[0]), math.exp(z[1]), math.exp(z[2]), math.exp(z[3]), math.exp(z[4])),
+                    SHO(math.exp(z[5]), math.exp(z[6]))]
+        if period is not None:
+            cands = [float(period)]
+        else:
+            pk = _lomb_scargle_peaks(t, y1, pmin, pmax, 2)
+            cands = pk + ([2 * pk[0]] if pk and 2 * pk[0] < pmax else [])
+        starts = [[a0, clipz(math.log(p), bounds[1]), 0.0, 0.0, math.log(0.5), clipz(a0 - 1.0, lA),
+                   clipz(math.log(dt_med * 10.0), lT)] for p in cands]
+    if fit_s:
+        bounds.append((math.log(1.0 / 3.0), math.log(3.0)))
+        starts = [s + [0.0] for s in starts]
+    lo = np.array([b[0] for b in bounds])
+    hi = np.array([b[1] for b in bounds])
+    nfev = [0]
+
+    def make(z):
+        return cls(terms=build(z), err_scale=math.exp(z[-1]) if fit_s else s_fix, baseline=baseline, gap=gap,
+                   baseline_sd=baseline_sd, breaks=breaks)
+
+    def nll(z):
+        nfev[0] += 1
+        g = make(z)
+        kind, pa, pb, pc = g.blocks()
+        return _ss_nll(t, y1, var0 * g.err_scale ** 2, yerr_, kind, pa, pb, pc, seg)
+
+    def fg(z):
+        f = nll(z)
+        g = np.empty(len(z))
+        for i in range(len(z)):
+            h = 1e-4
+            zp, zm = z.copy(), z.copy()
+            zp[i] = min(z[i] + h, hi[i])
+            zm[i] = max(z[i] - h, lo[i])
+            g[i] = (nll(zp) - nll(zm)) / (zp[i] - zm[i])
+        return f, g
+
+    best = None
+    for z0 in starts:
+        z, f = _minimize_bounded(fg, np.array(z0, dtype=np.float64), lo, hi)
+        if best is None or f < best[1]:
+            best = (z, f)
+    g = make(best[0])
+    g.fit_nll, g.fit_nfev, g.fit_points = float(best[1]), int(nfev[0]), int(len(t))
+    return g
+
+
 @jit(cache=True, nopython=True)
 def gp_setup(t, y1, var, valid, yerr, amp, tau):
     """Everything that does not depend on the transit model, for fixed hyperparameters (float64), at the output
@@ -500,25 +1404,29 @@ def gp_setup(t, y1, var, valid, yerr, amp, tau):
 
 
 @jit(cache=True, nopython=True, fastmath=True)
-def gp_quad(out_idx, Dv, F, K, irs, e, W, v):
+def gp_quad(out_idx, Dv, F, K, irs, e, W, v, H):
     """sum_k Dw_k^2 + 2 e_k Dw_k (Dw = L^-1 D) for the deficit D = Dv at the ascending output cadences out_idx
-    (0 elsewhere): the D-filter from the first to the last of them, plus the closed-form tail"""
+    (0 elsewhere): the D-filter over the window cadences and the gaps between them shorter than the horizon H
+    (gp_horizon), the closed-form tail after each stretch (the next one starts from state 0) (d = K.shape[1]
+    states; d > 2: _gp_quad_ss)"""
+    if K.shape[1] != 2:
+        return _gp_quad_ss(out_idx, Dv, F, K, irs, e, W, v, H)
     nk = out_idx.shape[0]
     if nk == 0:
         return 0.0
     acc = 0.0
     m0 = 0.0
     m1 = 0.0
-    i0 = out_idx[0]
-    i1 = out_idx[nk - 1]
+    c = out_idx[0]
+    start = c
     k = 0
-    for c in range(i0, i1 + 1):
-        if c > i0:
+    while True:
+        if c > start:
             nm0 = F[c, 0] * m0 + F[c, 1] * m1
             m1 = F[c, 2] * m0 + F[c, 3] * m1
             m0 = nm0
         d = 0.0
-        if k < nk and out_idx[k] == c:
+        if out_idx[k] == c:
             d = Dv[k]
             k += 1
         inn = d - m0
@@ -526,8 +1434,109 @@ def gp_quad(out_idx, Dv, F, K, irs, e, W, v):
         acc += dw * (dw + 2.0 * e[c])
         m0 += K[c, 0] * inn
         m1 += K[c, 1] * inn
-    acc += W[i1, 0] * m0 * m0 + 2.0 * W[i1, 1] * m0 * m1 + W[i1, 2] * m1 * m1 + 2.0 * (v[i1, 0] * m0 + v[i1, 1] * m1)
+        if k == nk:
+            break
+        s = out_idx[k]
+        if s - c > H[c]:
+            acc += (W[c, 0] * m0 * m0 + 2.0 * W[c, 1] * m0 * m1 + W[c, 2] * m1 * m1
+                    + 2.0 * (v[c, 0] * m0 + v[c, 1] * m1))
+            m0 = 0.0
+            m1 = 0.0
+            c = s
+            start = s
+        else:
+            c += 1
+    acc += W[c, 0] * m0 * m0 + 2.0 * W[c, 1] * m0 * m1 + W[c, 2] * m1 * m1 + 2.0 * (v[c, 0] * m0 + v[c, 1] * m1)
     return acc
+
+
+@jit(cache=True, nopython=True)
+def gp_horizon(F, K, eps=1e-12, block=16):
+    """H[c]: the zero-input steps of the D-filter after cadence c until its transition Phi(c -> c + H) =
+    A_(c+H) ... A_(c+1), A_j = (I - K_j e0') F_j, is below eps in the infinity norm (n - c: never within the data).
+    gp_quad steps a gap between window cadences c and s only if s - c <= H[c]; otherwise the dropped terms (the
+    decaying state's cross terms with the next windows' deficits) are ~eps x the chi^2 terms involved. A segment
+    start (F = 0) ends the horizon. Blocked (n block d^3 + n / block H d^3 instead of n H d^3): explicit steps from c
+    to the next block start b; beyond it |Phi(c -> j)| <= |Phi(b -> j)| r with r = |Phi(c -> b)|, so H[c] =
+    (b - c) + the horizon of b for the tolerance eps / r, from a ladder of tolerances eps 2^k (k = -7 ... 40) kept
+    at the block starts: at most a factor 2 (a few steps) beyond the exact horizon; explicit search when r > 128.
+    block >= n: the exact horizon everywhere (tests)."""
+    n, d = K.shape
+    H = np.empty(n, np.int64)
+    KLO, KHI = -7, 40
+    nb = (n + block - 1) // block
+    Hb = np.empty((nb, KHI - KLO + 1), np.int64)
+    P = np.empty((d, d))
+    Q = np.empty((d, d))
+
+    def step(j, P, Q):
+        # P <- A_j P; returns |P| (infinity norm)
+        for i in range(d):
+            for k in range(d):
+                x = 0.0
+                for l in range(d):
+                    x += F[j, i * d + l] * P[l, k]
+                Q[i, k] = x
+        big = 0.0
+        for i in range(d):
+            r = 0.0
+            for k in range(d):
+                P[i, k] = Q[i, k] - K[j, i] * Q[0, k]
+                r += abs(P[i, k])
+            big = max(big, r)
+        return big
+
+    def eye(P):
+        for i in range(d):
+            for k in range(d):
+                P[i, k] = 1.0 if i == k else 0.0
+
+    def search(c, lim, tol, P, Q):
+        # the first j in (c, lim] with |Phi(c -> j)| < tol (-1 if none); P = Phi(c -> min(j, lim))
+        eye(P)
+        for j in range(c + 1, lim + 1):
+            if step(j, P, Q) < tol:
+                return j
+        return -1
+
+    if block < n:
+        for ib in range(nb):
+            b = ib * block
+            for kk in range(KHI - KLO + 1):
+                Hb[ib, kk] = n - b                   # not reached within the data
+            eye(P)
+            kc = KHI                                 # the loosest tolerance not reached yet
+            for j in range(b + 1, n):
+                nrm = step(j, P, Q)
+                while kc >= KLO and nrm < eps * 2.0 ** kc:
+                    Hb[ib, kc - KLO] = j - b
+                    kc -= 1
+                if kc < KLO:
+                    break
+    for c in range(n):
+        b2 = (c // block + 1) * block
+        if c % block == 0 or b2 >= n:
+            j = search(c, n - 1, eps, P, Q)
+            H[c] = (j - c) if j >= 0 else n - c
+            continue
+        j = search(c, b2, eps, P, Q)
+        if j >= 0:
+            H[c] = j - c
+            continue
+        r = 0.0
+        for i in range(d):
+            x = 0.0
+            for k in range(d):
+                x += abs(P[i, k])
+            r = max(r, x)
+        if r > 2.0 ** -KLO:
+            j = search(c, n - 1, eps, P, Q)
+            H[c] = (j - c) if j >= 0 else n - c
+            continue
+        k = min(KHI, int(math.floor(-math.log2(max(r, 1e-300)))))
+        hb = Hb[b2 // block, k - KLO]
+        H[c] = (b2 - c) + hb if b2 + hb < n else n - c
+    return H
 
 
 @jit(cache=True, nopython=True, fastmath=True)
@@ -550,7 +1559,7 @@ def pandora_loglike_gp(
     t0_bary, t0_bary_offset, M_planet, r_moon, per_moon, tau_moon, Omega_moon,
     i_moon, ecc_moon, w_moon, M_moon, epoch_distance, supersampling_factor,
     occult_small_threshold, hill_sphere_threshold, time,
-    F, K, irs, e, W, v, c0, ld, cache, time_sorted
+    F, K, irs, e, W, v, H, c0, ld, cache, time_sorted
 ):
     """pandora_loglike() with the GP noise model (module docstring): the same window model, the deficits of the
     output cadences it touches, and the GP chi^2 of gp_quad"""
@@ -573,7 +1582,7 @@ def pandora_loglike_gp(
     Dv = np.empty(len(ft))
     for k in range(len(ft)):
         Dv[k] = 1.0 - ft[k]
-    return -0.5 * (c0 + gp_quad(out_idx, Dv, F, K, irs, e, W, v)) - ld
+    return -0.5 * (c0 + gp_quad(out_idx, Dv, F, K, irs, e, W, v, H)) - ld
 
 
 @jit(cache=True, nopython=True, fastmath=True)
@@ -581,7 +1590,7 @@ def pandora_loglike_planet_gp(
     u1, u2, R_star, per_bary, a_bary, r_planet, b_bary, w_bary, ecc_bary,
     t0_bary, t0_bary_offset, M_planet, epoch_distance, supersampling_factor,
     occult_small_threshold, hill_sphere_threshold, time,
-    F, K, irs, e, W, v, c0, ld, cache, time_sorted
+    F, K, irs, e, W, v, H, c0, ld, cache, time_sorted
 ):
     """pandora_loglike_planet() with the GP noise model: the planet's z^2 and flux on its transit windows (the fast
     path of pandora_loglike_planet), else pandora_loglike_gp with the planet-only moon parameters"""
@@ -607,7 +1616,7 @@ def pandora_loglike_planet_gp(
             u1, u2, R_star, per_bary, a_bary, r_planet, b_bary, w_bary, ecc_bary,
             t0_bary, t0_bary_offset, M_planet, r_m, p_m, tau_m, om_m, i_m, e_m,
             w_m, m_m, epoch_distance, supersampling_factor, occult_small_threshold,
-            hill_sphere_threshold, time, F, K, irs, e, W, v, c0, ld, cache, time_sorted
+            hill_sphere_threshold, time, F, K, irs, e, W, v, H, c0, ld, cache, time_sorted
         )
     idx = _runs_idx(los, his)
     b2 = float(b_bary) * float(b_bary)
@@ -626,7 +1635,7 @@ def pandora_loglike_planet_gp(
     Dv = np.empty(len(ft))
     for k in range(len(ft)):
         Dv[k] = 1.0 - ft[k]
-    return -0.5 * (c0 + gp_quad(out_idx, Dv, F, K, irs, e, W, v)) - ld
+    return -0.5 * (c0 + gp_quad(out_idx, Dv, F, K, irs, e, W, v, H)) - ld
 
 
 @jit(cache=True, nopython=True)
@@ -723,6 +1732,8 @@ def output_times(time, supersampling_factor):
 def whiten_deficit(Dfull, F, K, irs):
     """L^-1 D for the deficit D at all output cadences (full length): the whitened model part of the residual
     (the whitened residual is e + whiten_deficit(D), e = gp_setup's e)"""
+    if K.shape[1] != 2:
+        return _whiten_deficit_ss(Dfull, F, K, irs)
     n = Dfull.shape[0]
     out = np.zeros(n)
     m0 = 0.0
