@@ -560,6 +560,47 @@ def test_eclipse_limb_darkening_gradient():
         assert abs(vals[0] - vals[1]) < 1e-9, f"taper discontinuous at z_m = {zt}: {vals}"
 
 
+def test_eclipse_degenerate_geometry():
+    """Bugs #32, #33: eclipse() at the measure-zero planet-moon geometries.
+    #32: a planet concentric with a larger moon disk (d = 0) raised ZeroDivisionError in lens_gradient_term. The
+    overlap centroid is then the moon centre, so the gradient term is 0, and the flux is continuous for d -> 0.
+    #33: cci() returned NaN at internal tangency d = |r1 - r2| (in ~3 % of draws: an arccos or root argument out
+    of range by rounding); eclipse() then ignored the overlap (er = NaN fails er > 0), so a moon touching the
+    inside of the planet disk kept its full deficit. Now cci is finite there and that moon is fully eclipsed."""
+    from pandoramoon.eclipse import eclipse, lens_gradient_term
+    from pandoramoon.occult import cci
+    u1, u2 = 0.4, 0.26
+    a = np.array
+    for rp, rm, x in ((0.01, 0.02, 0.3), (0.05, 0.08, 0.0), (0.01, 0.02, 0.99)):
+        f0 = occult_hybrid(np.hypot(a([x]), a([0.1])), rm, u1, u2)
+        f = eclipse(a([x]), a([0.1]), a([x]), a([0.1]), rp, rm, f0.copy(), u1, u2)[0]
+        g = eclipse(a([x + 1e-9]), a([0.1]), a([x]), a([0.1]), rp, rm, f0.copy(), u1, u2)[0]
+        assert np.isfinite(f) and abs(f - g) < 1e-10, f"d = 0 (rp {rp}, rm {rm}, x {x}): {f} vs d = 1e-9: {g}"
+        if x < 0.9:     # on the star: no gradient term, er = (rp / rm)^2
+            want = 1 - (1 - f0[0]) * (1 - (rp / rm) ** 2)
+            assert abs(f - want) < 1e-14, f"d = 0 on the star: {f} != {want}"
+    rng = np.random.default_rng(45)
+    for trial in range(3000):
+        rp, rm = np.exp(rng.uniform(np.log(0.002), np.log(0.25), 2))
+        zm, phi, th = rng.uniform(0, 0.5), rng.uniform(0, 2 * np.pi), rng.uniform(0, 2 * np.pi)
+        xm, ym = zm * np.cos(phi), zm * np.sin(phi)     # both disks inside the star (z + r < 1): not on the limb
+        xp, yp = xm + abs(rp - rm) * np.cos(th), ym + abs(rp - rm) * np.sin(th)
+        d = np.hypot(xm - xp, ym - yp)
+        small = np.pi * min(rp, rm) ** 2
+        c = cci(rp, rm, d)
+        assert abs(c - small) <= 1e-4 * small, f"trial {trial}: cci at internal tangency {c} != {small}"
+        dext = (rp + rm) * (1 + rng.normal(0, 3e-16))
+        ce = cci(rp, rm, dext)    # 0 up to cancellation (either sign, <= 2e-8 (rp + rm)^2 in 1e5 draws)
+        assert abs(ce) <= 1e-7 * (rp + rm) ** 2, f"trial {trial}: cci at external tangency {ce}"
+        f0 = occult_hybrid(np.hypot(a([xm]), a([ym])), rm, u1, u2)
+        f = eclipse(a([xp]), a([yp]), a([xm]), a([ym]), rp, rm, f0.copy(), u1, u2)[0]
+        if rm < rp:     # moon inside the planet disk, touching its edge: fully eclipsed
+            assert abs(f - 1) < 1e-9, f"trial {trial}: moon tangent inside the planet: flux {f}, not 1"
+        else:           # planet inside the moon disk: the planet's area is eclipsed, plus the T4 term
+            want = 1 - (1 - f0[0]) * (1 - (rp / rm) ** 2) + lens_gradient_term(xp, yp, xm, ym, d, rp, rm, u1, u2)
+            assert abs(f - want) < 1e-9, f"trial {trial}: planet tangent inside the moon: {f} vs {want}"
+
+
 def test_complete_occultation():
     """Bug #16: k > 1 and z <= k-1 gives zero flux in both functions."""
     zs = np.array([0.0, 0.05, 0.1, 0.19])

@@ -853,6 +853,37 @@ boundary, NaN / +-inf in every parameter, all five entry points; the
 jitted check equals `check_params` on 3000 random draws; mutations caught:
 a dropped rule, fastmath on the check, a dropped finiteness test).
 
+## 32. `eclipse()` raised ZeroDivisionError for a planet concentric with a larger moon disk - FIXED
+
+Severity: low (measure-zero geometry: planet and moon centres coincide exactly, r_moon > r_planet), but an
+exception inside the likelihood
+Location: `pandoramoon/eclipse.py`, `lens_gradient_term()`
+Fixed in: "eclipse(): no division by d = 0 in the T4 term; cci() finite at tangency (bugs #32, #33)"
+
+With the planet fully inside the moon disk the T4 term used the overlap centroid offset
+(s - d) e_pm . r_hat_m with e_pm = (m - p) / d, and divided by d. At d = 0 (found by a stress test of
+degenerate geometries, 2026-11-14: one of 20000 random configurations) that raised ZeroDivisionError. In that
+case the overlap is the planet disk, so its centroid is the planet centre and the offset is (p - m) directly; no
+division is needed. At d = 0 the term is 0 and the flux is continuous in d -> 0 (d = 1e-9 vs 0: 1.6e-14). For
+d > 0 the result changes only by rounding (1.28 M random cadences of every overlap kind: max 6.7e-16).
+
+## 33. `cci()` returned NaN at internal tangency: `eclipse()` then ignored the overlap (up to 6600 ppm) - FIXED
+
+Severity: low (measure-zero geometry: d = |r_planet - r_moon| to a few ulp), but silently wrong
+Location: `pandoramoon/occult.py`, `cci()` (used by `eclipse_ratio()` and `occult_small()`)
+Fixed in: "eclipse(): no division by d = 0 in the T4 term; cci() finite at tangency (bugs #32, #33)"
+
+Near a tangency the branch tests (`r1 >= d + r2`, ...) and the lens formula round differently: the arccos
+arguments can leave [-1, 1] and the root's argument can turn slightly negative, which gave NaN (577 of 20000
+exact internal tangencies; external ones too). `eclipse_ratio()` returned er = NaN, `er > 0` failed, and
+`eclipse()` left the moon flux unchanged: a moon touching the inside of the planet disk kept its whole deficit
+instead of being fully eclipsed (max 6.6e-3 in the test draws). The arguments are now clamped to their ranges.
+Where they were in range nothing changes (cci bit-identical on the random draws). The lens area at an exact
+tangency keeps the formula's ill-conditioning (2e5 random draws, radii 0.002-0.25: at internal tangency
+<= 2.1e-8 absolute, <= 7e-5 of the smaller disk; at external tangency |area| <= 2.4e-9, of either sign; flux
+<= 0.013 ppm).
+Both pinned by `test_eclipse_degenerate_geometry` (fails with either fix reverted).
+
 ## Known limitations (documented, not bugs)
 
 - `eclipse()` jumps by T4's gradient term at er -> 1 on the stellar limb:

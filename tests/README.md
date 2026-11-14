@@ -5,7 +5,7 @@ they test a PyPI release (`pip install pandoramoon`) as well as a checkout (`pip
 `PANDORA_PATH=/path/to/Pandora`).
 
 ```
-python run_tests.py                # 12 light-curve cases + 45 unit tests, about 1 min, exit code 0 = pass
+python run_tests.py                # 12 light-curve cases + 46 unit tests, about 1 min, exit code 0 = pass
 python run_tests.py -v             # with timings
 python run_tests.py --lc           # light-curve cases only
 python run_tests.py --unit         # unit tests only (same as python unit_tests.py)
@@ -25,7 +25,7 @@ Needed: `numpy`, `numba`, `matplotlib` (video test), `tqdm`, `wotan` (one check 
 | `cases.py` | the 12 light-curve cases (star, planet, moon, cadence) and their fingerprints |
 | `reference.json` | stored fingerprints of the 12 cases (relative tolerance 1e-7) |
 | `run_tests.py` | runs the cases against `reference.json`, the unit tests and optionally the sampler tests |
-| `unit_tests.py` | 45 bug-pinning unit tests against independent references (radial integration, disk intersection by integration, mpmath values) |
+| `unit_tests.py` | 46 bug-pinning unit tests against independent references (radial integration, disk intersection by integration, mpmath values) |
 | `test_sampling.py` | tests of the fit API (`NestedSampler`, priors, moon-phase coordinates, importance-sampled planet evidence, `detect`) |
 | `check_sensitivity.py` | meta test: applies code mutations (time shift, wrong moon phase, eclipses off, ...) and reports which cases and unit tests catch them |
 | `generate_reference.py` | regenerates `reference.json`. Run it only after an intended, verified model change, never to make a test pass. |

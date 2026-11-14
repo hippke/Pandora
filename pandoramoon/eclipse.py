@@ -101,9 +101,11 @@ def lens_gradient_term(xp, yp, xm, ym, d, r_planet, r_moon, u1, u2):
     w = min(1.0, (1 - zm) / r_moon)
     if d <= r_planet - r_moon:         # moon fully behind the planet: exact (er = 1)
         return 0.0
-    if d <= r_moon - r_planet:         # planet fully inside the moon disk
+    if d <= r_moon - r_planet:         # planet fully inside the moon disk: the lens is the planet disk
         A = pi * r_planet * r_planet
-        s = 0.0
+        # centroid = planet centre, (c - m) . r_hat_m z_m = (p - m) . m without dividing by d (d = 0: planet
+        # concentric with the moon, which raised ZeroDivisionError)
+        proj = (xp - xm) * xm + (yp - ym) * ym
     else:
         a = (d * d + r_planet * r_planet - r_moon * r_moon) / (2 * d)
         h = sqrt(max(r_planet * r_planet - a * a, 0.0))
@@ -114,11 +116,11 @@ def lens_gradient_term(xp, yp, xm, ym, d, r_planet, r_moon, u1, u2):
         if not (A > 0):
             return 0.0
         s = d * A_m / A
-    # (c - m) . r_hat_m * dI/dr; c - m = (s - d) e_pm with e_pm the unit
-    # vector planet -> moon; z_m cancels: dI/dr = -(u1 + 2 u2 (1 - mu)) z_m / mu
+        # c - m = (s - d) e_pm with e_pm the unit vector planet -> moon (d > |r_planet - r_moon| >= 0 here)
+        proj = (s - d) * ((xm - xp) * xm + (ym - yp) * ym) / d
+    # (c - m) . r_hat_m * dI/dr; proj = (c - m) . r_hat_m z_m, and z_m cancels: dI/dr = -(u1 + 2 u2 (1 - mu)) z_m / mu
     mu = sqrt(1 - zm * zm)
-    e_dot_m = ((xm - xp) * xm + (ym - yp) * ym) / d
-    grad = -(u1 + 2 * u2 * (1 - mu)) / mu * (s - d) * e_dot_m
+    grad = -(u1 + 2 * u2 * (1 - mu)) / mu * proj
     return w * A * grad / (pi * (1 - u1 / 3 - u2 / 6))
 
 

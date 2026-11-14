@@ -85,7 +85,10 @@ def read_occult_cache(zs_target, k, cache):
 @jit(cache=True, nopython=True, fastmath=True, parallel=False)
 def cci(r1, r2, d):
     """Circle-Circle-Intersect to calculate the area of asymmetric "lens"
-    Source: http://mathworld.wolfram.com/Circle-CircleIntersection.html"""
+    Source: http://mathworld.wolfram.com/Circle-CircleIntersection.html
+    Near a tangency (d = r1 + r2 or d = |r1 - r2| to a few ulp) the branch tests and the formula round differently:
+    the arccos arguments can leave [-1, 1] and the root's argument can turn negative by rounding, which gave NaN
+    (in about 3 % of exact internal tangencies). Both are clamped; this changes nothing where they were in range."""
     if r1 < d - r2:
         return 0
     elif r1 >= d + r2:
@@ -93,10 +96,13 @@ def cci(r1, r2, d):
     elif d - r2 <= -r1:
         return pi * r1**2
     else:
+        c2 = (d**2 + r2**2 - r1**2) / (2 * d * r2)
+        c1 = (d**2 + r1**2 - r2**2) / (2 * d * r1)
+        q = (-d + r2 + r1) * (d + r2 - r1) * (d - r2 + r1) * (d + r2 + r1)
         return (
-            r2**2 * arccos((d**2 + r2**2 - r1**2) / (2 * d * r2))
-            + r1**2 * arccos((d**2 + r1**2 - r2**2) / (2 * d * r1))
-            - 0.5 * sqrt((-d + r2 + r1) * (d + r2 - r1) * (d - r2 + r1) * (d + r2 + r1))
+            r2**2 * arccos(max(min(c2, 1.0), -1.0))
+            + r1**2 * arccos(max(min(c1, 1.0), -1.0))
+            - 0.5 * sqrt(max(q, 0.0))
         )
 
 
