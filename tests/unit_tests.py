@@ -1337,7 +1337,8 @@ def test_orbit_block_anchors():
     measured 0.27 of it, as for 54be54e's per-sample sincos_turns), with
     dense and coarse sampling, gaps and repeated times inside runs (blocks
     whose span exceeds the polynomial range use sincos_turns), empty and
-    single-sample runs; both loops of each function vectorise (since P26
+    single-sample runs; ellipse_z_only_runs matches the same reference
+    with the same tolerance; both loops of each function vectorise (since P26
     they return z^2 without a sqrt: counted as vector.body blocks with
     double vector arithmetic).
     Mutations caught (scratch_p24d/mutate.py): SS4 or SC5 dropped, range
@@ -1383,7 +1384,7 @@ def test_orbit_block_anchors():
                 o.append(v)
         return [np.concatenate(o) for o in out]
 
-    worst = 0.0
+    worst = worst_zo = 0.0
     n_blocks = [0, 0]  # sincos_turns blocks, sincos_small blocks
     for _ in range(300):
         a, per, tau = rng.uniform(0.005, 0.5), 10 ** rng.uniform(-0.5, 1.5), rng.uniform()
@@ -1418,7 +1419,6 @@ def test_orbit_block_anchors():
                 n_blocks[int(max(ta - tb[0], tb[-1] - ta) * omega <= SMALL_PHI_MAX)] += 1
         out = list(el.ellipse_z_runs(a, per, tau, Om, inc, t, los, his, ct, cd, tdur, sh, q, b))
         zo = el.ellipse_z_only_runs(a, per, tau, Om, inc, t, los, his, ct, cd, tdur, sh, q, b)
-        assert np.array_equal(zo[0], out[4]) and np.array_equal(zo[1], out[5]), "z-only loop differs"
         out[4:] = np.sqrt(out[4]), np.sqrt(out[5])      # P26: z^2
         R = ref(a, per, tau, Om, inc, t, los, his, ct, cd, tdur, sh, q, b)
         u_max = np.max(np.abs(t)) / per + abs(tau)
@@ -1426,7 +1426,12 @@ def test_orbit_block_anchors():
         tol = np.finfo(float).eps * (2 * np.pi * a * u_max + x_max)
         d = max(float(np.max(np.abs(x - y), initial=0)) for x, y in zip(out, R))
         worst = max(worst, d / tol)
+        # the z-only loop against the same reference (not bit-identical to ellipse_z_runs: under fastmath LLVM may
+        # contract the same source differently in the two functions; numba 0.62 / 0.63 do, 0.68 does not)
+        d = max(float(np.max(np.abs(np.sqrt(x) - y), initial=0)) for x, y in zip(zo, R[4:]))
+        worst_zo = max(worst_zo, d / tol)
     assert worst <= 1.0, f"orbit with block anchors: error {worst:.2f} x tolerance"
+    assert worst_zo <= 1.0, f"z-only orbit with block anchors: error {worst_zo:.2f} x tolerance"
     # measured 419 / 1742 (ANCHOR_BMIN = 32)
     assert n_blocks[1] > 1000 and n_blocks[0] > 100, f"blocks (sincos_turns, sincos_small): {n_blocks}"
     # both loops (anchored and per-sample sincos_turns) of each function vectorise
