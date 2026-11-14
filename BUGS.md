@@ -890,19 +890,42 @@ tangency keeps the formula's ill-conditioning (2e5 random draws, radii 0.002-0.2
 <= 0.013 ppm).
 Both pinned by `test_eclipse_degenerate_geometry` (fails with either fix reverted).
 
-## 34. `er_fast()` returns er = 1 just outside internal tangency on the stellar limb - OPEN
+## 34. `er_fast()` returned er = 1 near tangencies on the stellar limb (moon deficit lost) - FIXED
 
-Severity: low (a band of width ~1e-7 r_moon in the planet-moon distance), but the moon's whole deficit is lost
+Severity: low (a band of ~1e-12 ... 5e-9 in absolute distance from a tangency), but the moon's whole deficit is lost
 Location: `pandoramoon/overlap_analytic.py`, `er_fast()` (the three-circle area used by `eclipse()` on the limb)
 Found 2026-11-14 while testing the GPU eclipse kernel against the CPU.
+Fixed in: "er_fast: arc-interval area where the vertex walk fails near tangency (bug #34)"
 
-With the planet inside a larger moon disk and the moon on the stellar limb, at d = (r_moon - r_planet) + delta
-with delta ~ 1e-12 ... 1e-6 r_moon, `er_fast` often returns 1.0 (moon fully eclipsed) instead of a value near the
-two-circle ratio (e.g. 1.0 vs 0.31 at r_p 0.130, r_m 0.234, delta 4e-10): `eclipse()` then sets the moon flux to 1.
-Fraction of random limb draws wrong by > 0.01 in er: delta ~ 1e-12 r_m: 0.5 %, 1e-10: 12 %, 1e-9: 17 %, 1e-8:
-7.5 %, 1e-7: 0.15 %, 1e-4: 0; delta ~ 1e-14 r_m and a few probes at delta = 0 were correct. The GPU's er3
-is correct there (same geometry: GPU 1.20e-2, CPU 0, CPU with d moved by 1e-6 relative 1.20e-2). Probably the
-two planet-moon crossings, ~sqrt(delta) apart, are classified inconsistently; not investigated further.
+With the planet inside a larger moon disk near internal tangency, d = (r_moon - r_planet) + delta, and the moon on
+the limb, `er_fast` often returned 1.0 (moon fully eclipsed): `eclipse()` then set the moon flux to 1. Example:
+r_p 0.130, r_m 0.234, delta 4.3e-10: 1.0 instead of 0.42149 (the two-circle ratio (r_p / r_m)^2 is 0.31). The same
+happened with the planet or the moon near-tangent to the stellar limb. Two causes:
+- The vertex walk of `area3_fast_core` tests "inside the third disk" with a margin of 1e-9 (EPS_IN), but reduces
+  a contained pair only within 1e-12 (EPS_TAN). Between the two, a near-tangent pair leaves a sliver (here the
+  part of the planet outside the moon) thinner than the margin: the midpoint of the sliver's short arc lies only
+  delta inside the other disk, fails the margin test in both directions, and the walk finds no valid arc and
+  returns NaN (rarely the walk instead collects one vertex, or two from different pairs, and returns area 0).
+- `er_fast` returned `min(1, a_smp / a_sm)`, and min(1, NaN) = 1, so the NaN became er = 1 and the NaN fallback in
+  `eclipse()` (the two-circle ratio, which would also be wrong on the limb) never ran.
+Before the fix, the fraction of random limb draws off by > 1e-6 of the moon area was, by absolute delta: planet
+inside the moon 2.7 % (1e-12), 22 % (1e-11), 24 % (1e-10), 13 % (1e-9), 0 (3e-9 and above; largest failing delta
+5.4e-9); planet or moon near-tangent to the limb 4-10 % for 1e-11 ... 1e-9. The GPU `er3` was correct (its
+arc-interval form has no vertices or margins).
+Fix: where the walk returns NaN or one of those impossible vertex sets, `er_fast` takes both areas of its ratio
+from the same arc-interval form as the GPU `er3` and `tests/gpu/area3_ref.py`, in FP64 (`_area3_arcs`,
+`_area2_arcs`, moon-centred coordinates). The NaN test is a `fastmath=False` helper (`_isnan`, as `_is_nan` in
+eclipse.py) plus the walk's CASE_DEGENERATE code: `eclipse()` is `fastmath=True`, numba callees inherit that
+unless they set it, and the cache keeps whichever variant compiled first, so `er_fast` usually runs with
+fastmath, where a plain `x != x` is dropped (a first version of this fix did exactly that and still returned 1).
+The fallback functions set `fastmath=False` too. Elsewhere nothing changes: bit-identical on 2e6 random limb
+configurations, both compiled directly and under inherited fastmath (the fallback never fired there), and on
+the 127k band draws where the walk succeeded. Against a 60-digit mpmath evaluation, on 3000 fallback draws:
+|d er| median 2e-16, max 4.7e-12 (<= 4e-15 of the moon area); at the other near-tangencies where it fires (a body
+against the limb, planet and moon touching externally; delta 0 ... 1e-7) <= 6.4e-11 of the moon area (rounding
+of the arc end points). `eclipse()` at the example geometry is now continuous (deficit vs the planet moved
+outward by 1e-6 relative: 1.2e-9 apart). Pinned by `test_er_fast_near_tangency` (the example geometry, also compiled with
+fastmath, and 45 of its 400 band draws fail before the fix).
 
 ## Known limitations (documented, not bugs)
 

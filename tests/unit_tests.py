@@ -740,6 +740,52 @@ def test_analytic_eclipse_matches_reference():
         assert abs(er_fast(*args) - ref) < 1e-7, f"er_fast{args} = {er_fast(*args)}, ref {ref}"
 
 
+def test_er_fast_near_tangency():
+    """Bug #34: er_fast returned er = 1 (moon fully eclipsed) near the tangencies the vertex walk cannot resolve:
+    a planet inside a larger moon disk within ~1e-12 ... 5e-9 of internal tangency (the sliver of the planet
+    outside the moon is thinner than the walk's 1e-9 inside margin), or a body within ~1e-12 ... 3e-9 of
+    tangency with the stellar limb. The walk returned NaN, and min(1, NaN) = 1. er_fast now takes both areas
+    from the margin-free arc-interval form there, with a NaN test that survives fastmath. Reference: numerical
+    integration (< 1e-6 of the moon area, as in test_analytic_eclipse_matches_reference); before the fix 45 of
+    the 400 draws failed."""
+    from pandoramoon.overlap_analytic import er_fast
+    # the geometry of the bug report (moon on the limb, d - (r_m - r_p) = 4.3e-10): er from a 60-digit
+    # mpmath evaluation of the arc-interval area; the walk-based er_fast returned 1.0
+    args = (0.8331378698348999, 0.36847367882728577, 0.13001558184623718,
+            0.8897338509559631, 0.28169992566108704, 0.2336147576570511)
+    assert abs(er_fast(*args) - 0.4214863253502136) < 1e-12, f"er_fast{args} = {er_fast(*args)}"
+    # eclipse() is fastmath=True and numba callees inherit that, so er_fast is often compiled with fastmath, where
+    # a plain x != x NaN test is dropped and the fallback never fires: compile it that way explicitly
+    from numba import njit
+    er_fm = njit(fastmath=True)(er_fast.py_func)(*args)
+    assert abs(er_fm - 0.4214863253502136) < 1e-12, f"er_fast{args} compiled with fastmath = {er_fm}"
+    rng = np.random.default_rng(34)
+    for trial in range(400):
+        rm = rng.uniform(0.02, 0.3)
+        th, ph = rng.uniform(0, 2 * np.pi, 2)
+        delta = 10 ** rng.uniform(-11.5, -8.3)
+        if trial % 2 == 0:      # planet inside the moon disk near internal tangency, moon on the limb
+            rp = rm * rng.uniform(0.1, 0.95)
+            zm = rng.uniform(1 - rm, 1 + rm)
+            xm, ym = zm * np.cos(th), zm * np.sin(th)
+            d = rm - rp + delta
+            xp, yp = xm + d * np.cos(ph), ym + d * np.sin(ph)
+        else:                   # planet near-tangent to the stellar limb (inside or outside), moon overlapping it
+            rp = rng.uniform(0.02, 0.3)
+            zp = 1 - rp + delta if rng.random() < 0.5 else 1 + rp - delta
+            xp, yp = zp * np.cos(th), zp * np.sin(th)
+            d = rng.uniform(0, 1) * (rp + rm)
+            xm, ym = xp + d * np.cos(ph), yp + d * np.sin(ph)
+        a_m = np.pi * rm * rm
+        a_sm = _disk_intersection_area([(0, 0, 1), (xm, ym, rm)])
+        a_smp = _disk_intersection_area([(0, 0, 1), (xm, ym, rm), (xp, yp, rp)])
+        er_ref = 1.0 if a_sm <= 0 else min(1.0, a_smp / a_sm)
+        er_a = er_fast(xp, yp, rp, xm, ym, rm)
+        assert np.isfinite(er_a), f"trial {trial}: NaN for {(xp, yp, rp, xm, ym, rm)}"
+        assert abs(er_a - er_ref) * a_sm / a_m < 1e-6, \
+            f"trial {trial}: er_fast{(xp, yp, rp, xm, ym, rm)} = {er_a}, ref {er_ref}"
+
+
 def test_eclipse_method_switch():
     """The legacy pixel raster (eclipse_method="pixelmap") was removed in 2026-10: moon_model and Likelihood
     reject it with a ValueError; Likelihood(numerical_grid=...) only warns (the argument is ignored)."""

@@ -8,6 +8,9 @@ Vendored from the standalone development project ../overlap3
 implementation, the curated 20-example taxonomy suite, 171 tests, pixel-map
 validation and the literature notes (Fewell 2006; Kipping 2011; Gordon &
 Agol 2022 App. B reflex correction). Only er_fast_batch was left out.
+Added here: where the vertex walk cannot resolve a near-tangent geometry,
+er_fast takes its areas from the margin-free arc-interval form of the GPU
+er3 (_area3_arcs, _area2_arcs; bug #34 in BUGS.md).
 
 Original module docstring follows.
 
@@ -986,14 +989,170 @@ def _gap_pass(a1, x1, y1, a2, x2, y2, ox, oy, r, c1x, c1y, mm1, c2x, c2y, mm2):
             and _inside(pmx, pmy, c2x, c2y, mm2))
 
 
+@njit(cache=True, fastmath=False)
+def _isnan(x):
+    """NaN test compiled without fastmath: er_fast is called from eclipse()
+    (fastmath=True), numba callees inherit fastmath unless they set it, and
+    under fastmath the compiler may assume no NaN and drop x != x."""
+    return x != x
+
+
+# The arc-interval fallback of er_fast (bug #34) sets fastmath=False for the
+# same reason: it then evaluates as written whichever caller compiles it.
+@njit(cache=True, fastmath=False)
+def _seg(L):
+    """L - sin L (Taylor series through L^15 for L < 0.5: no cancellation)."""
+    if L < 0.5:
+        L2 = L * L
+        return L * L2 * (1.0 / 6.0 - L2 * (1.0 / 120.0 - L2 * (1.0 / 5040.0 - L2 * (
+            1.0 / 362880.0 - L2 * (1.0 / 39916800.0 - L2 * (
+                1.0 / 6227020800.0 - L2 * (1.0 / 1307674368000.0)))))))
+    return L - np.sin(L)
+
+
+@njit(cache=True, fastmath=False)
+def _arc_inside(xi, yi, ri, xj, yj, rj):
+    """Part of circle i inside disk j: (0, ., .) disks disjoint, (1, ., .)
+    all of circle i, (2, ., .) none of it (disk j inside circle i), or
+    (3, s, L) the arc from angle s of length L. Half-chord by the Heron form
+    with d - r = (d^2 - r^2) / (d + r) (no cancellation near tangency)."""
+    dx = xj - xi
+    dy = yj - yi
+    d2 = dx * dx + dy * dy
+    d = np.sqrt(d2)
+    if d >= ri + rj:
+        return 0, 0.0, 0.0
+    if d <= rj - ri:
+        return 1, 0.0, 0.0
+    if d <= ri - rj:
+        return 2, 0.0, 0.0
+    dmi = (d2 - ri * ri) / (d + ri)       # d - r_i
+    dmj = (d2 - rj * rj) / (d + rj)       # d - r_j
+    p = (ri + rj + d) * (rj - dmi) * (dmj + ri) * (dmi + rj)   # (2 d h)^2
+    h = np.sqrt(max(p, 0.0)) / (2.0 * d)
+    a = (d2 + (ri - rj) * (ri + rj)) / (2.0 * d)
+    alpha = np.arctan2(h, a)
+    return 3, np.arctan2(dy, dx) - alpha, 2.0 * alpha
+
+
+@njit(cache=True, fastmath=False)
+def _arc_terms(cx, cy, r, s, L):
+    """Green's-theorem contribution of the CCW arc (s, s + L) of circle
+    (cx, cy, r): circular segment + shoelace term of the chord."""
+    e = s + L
+    psx = cx + r * np.cos(s)
+    psy = cy + r * np.sin(s)
+    pex = cx + r * np.cos(e)
+    pey = cy + r * np.sin(e)
+    return 0.5 * r * r * _seg(L) + 0.5 * (psx * pey - psy * pex)
+
+
+@njit(cache=True, fastmath=False)
+def _circle_part(xi, yi, ri, xj, yj, rj, xk, yk, rk):
+    """The arcs of circle i inside disks j and k (the boundary of the common
+    overlap on circle i): (0, 0) overlap empty, (1, 0) overlap = disk i,
+    (2, contribution) otherwise."""
+    tj, sj, Lj = _arc_inside(xi, yi, ri, xj, yj, rj)
+    tk, sk, Lk = _arc_inside(xi, yi, ri, xk, yk, rk)
+    if tj == 0 or tk == 0:
+        return 0, 0.0
+    if tj == 2 or tk == 2:
+        return 2, 0.0
+    if tj == 1 and tk == 1:
+        return 1, 0.0
+    if tj == 1:
+        return 2, _arc_terms(xi, yi, ri, sk, Lk)
+    if tk == 1:
+        return 2, _arc_terms(xi, yi, ri, sj, Lj)
+    # two arcs on one circle intersect in at most two arcs
+    dl = (sk - sj) % TWO_PI               # start of arc k relative to arc j
+    c = 0.0
+    if dl < Lj:
+        L = min(Lj, dl + Lk) - dl
+        if L > 0.0:
+            c += _arc_terms(xi, yi, ri, sj + dl, L)
+    if dl + Lk > TWO_PI:
+        L = min(Lj, dl + Lk - TWO_PI)
+        if L > 0.0:
+            c += _arc_terms(xi, yi, ri, sj, L)
+    return 2, c
+
+
+@njit(cache=True, fastmath=False)
+def _area3_arcs(x0, y0, r0, x1, y1, r1, x2, y2, r2):
+    """Area of the common overlap of three disks from the arc intervals
+    (formulation of the GPU er3, pandoramoon/gpu/model.cu, and of
+    tests/gpu/area3_ref.py, in FP64): no vertices, no inside margins, no
+    tangency classification, so near-tangent pairs give arcs of length ~ 0
+    and contribute ~ 0. Used by er_fast where the vertex walk of
+    area3_fast_core cannot resolve the geometry. Pass coordinates relative
+    to a point near the overlap (er_fast: the moon centre)."""
+    area = 0.0
+    t, c = _circle_part(x0, y0, r0, x1, y1, r1, x2, y2, r2)
+    if t == 0:
+        return 0.0
+    if t == 1:
+        return np.pi * r0 * r0
+    area += c
+    t, c = _circle_part(x1, y1, r1, x0, y0, r0, x2, y2, r2)
+    if t == 0:
+        return 0.0
+    if t == 1:
+        return np.pi * r1 * r1
+    area += c
+    t, c = _circle_part(x2, y2, r2, x0, y0, r0, x1, y1, r1)
+    if t == 0:
+        return 0.0
+    if t == 1:
+        return np.pi * r2 * r2
+    area += c
+    return max(area, 0.0)
+
+
+@njit(cache=True, fastmath=False)
+def _area2_arcs(x0, y0, r0, x1, y1, r1):
+    """Area of the overlap of two disks in the same arc-interval form as
+    _area3_arcs (er_fast takes both areas of its ratio from one method)."""
+    area = 0.0
+    t, s, L = _arc_inside(x0, y0, r0, x1, y1, r1)
+    if t == 0:
+        return 0.0
+    if t == 1:
+        return np.pi * r0 * r0
+    if t == 3:
+        area += _arc_terms(x0, y0, r0, s, L)
+    t, s, L = _arc_inside(x1, y1, r1, x0, y0, r0)
+    if t == 1:
+        return np.pi * r1 * r1
+    if t == 3:
+        area += _arc_terms(x1, y1, r1, s, L)
+    return max(area, 0.0)
+
+
 @njit(cache=True)
 def er_fast(xp, yp, rp, xm, ym, rm):
     """Analytic replacement for Pandora's pixelart() (optimized):
         er = min(1, A(star & planet & moon) / A(star & moon)),
     with the A_SM = 0 -> 1 branch (computed first, so off-star moons
-    return immediately without evaluating the triple overlap)."""
+    return immediately without evaluating the triple overlap).
+
+    Where the vertex walk cannot resolve the geometry (it returns NaN /
+    CASE_DEGENERATE, or the vertex sets that no non-degenerate overlap has:
+    one vertex, or two from different pairs), both areas come from the
+    margin-free arc-interval form instead (_area3_arcs, _area2_arcs;
+    moon-centred coordinates). The NaN test is _isnan (no fastmath).
+    Bug #34: a planet inside the moon disk within ~1e-12 ... 5e-9 of
+    internal tangency (or a body as close to tangency with the limb) leaves
+    a sliver thinner than the 1e-9 inside margin; the walk's NaN became
+    er = 1 through min(1, NaN)."""
     a_sm = _lens_area(1.0, rm, np.sqrt(xm * xm + ym * ym))
     if a_sm <= 0.0:
         return 1.0
-    a_smp = area3_fast_core(0.0, 0.0, 1.0, xp, yp, rp, xm, ym, rm)[0]
+    a_smp, case, nv, _ = area3_fast_core(0.0, 0.0, 1.0, xp, yp, rp, xm, ym, rm)
+    if (case == CASE_DEGENERATE or _isnan(a_smp)
+            or (case == CASE_EMPTY and (nv == 1 or nv == 2))):
+        a_sm = _area2_arcs(-xm, -ym, 1.0, 0.0, 0.0, rm)
+        if a_sm <= 0.0:
+            return 1.0
+        a_smp = _area3_arcs(-xm, -ym, 1.0, xp - xm, yp - ym, rp, 0.0, 0.0, rm)
     return min(1.0, a_smp / a_sm)
