@@ -300,3 +300,16 @@ def er3(X):
     _cuda.launch(mod.get_kernel("t_er3"), (m + 127) // 128, 128, _cuda.ptr(dX), np.int32(m), _cuda.ptr(dO))
     cuda.synchronize()
     return dO.copy_to_host()
+
+
+def eclipse_dm(X):
+    """component test: the moon deficit after the planet-moon overlap at rows (xp, yp, xm, ym, kp, km, dm, u1, u2)"""
+    from numba import cuda
+    mod = _cuda.module(1)
+    X = np.ascontiguousarray(X, dtype=np.float32)
+    m = X.shape[0]
+    dX = cuda.to_device(X.ravel())
+    dO = cuda.device_array(m, np.float32)
+    _cuda.launch(mod.get_kernel("t_eclipse_dm"), (m + 127) // 128, 128, _cuda.ptr(dX), np.int32(m), _cuda.ptr(dO))
+    cuda.synchronize()
+    return dO.copy_to_host()

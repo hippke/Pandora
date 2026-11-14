@@ -867,6 +867,12 @@ case the overlap is the planet disk, so its centroid is the planet centre and th
 division is needed. At d = 0 the term is 0 and the flux is continuous in d -> 0 (d = 1e-9 vs 0: 1.6e-14). For
 d > 0 the result changes only by rounding (1.28 M random cadences of every overlap kind: max 6.7e-16).
 
+The FP32 GPU kernel (`pandoramoon/gpu/model.cu`, `eclipse_dm`) had the same division: at d = 0 it computed
+0 / 0 = NaN, and its final clamp (`dmn > 0 ? dmn : 0`) turned that into a moon deficit of 0 (the moon vanished
+instead of losing the planet's share). Fixed the same way ("GPU eclipse_dm: no 0 / 0 at d = 0 (bug #32)").
+Pinned by `tests/gpu/test_model.py::test_eclipse_dm` (component kernel `t_eclipse_dm` against the CPU eclipse()
+on 12000 overlaps of every kind; d = 0 max 7.8e-9 after, 9.3e-2 before); the other GPU tests are unchanged.
+
 ## 33. `cci()` returned NaN at internal tangency: `eclipse()` then ignored the overlap (up to 6600 ppm) - FIXED
 
 Severity: low (measure-zero geometry: d = |r_planet - r_moon| to a few ulp), but silently wrong
@@ -883,6 +889,20 @@ tangency keeps the formula's ill-conditioning (2e5 random draws, radii 0.002-0.2
 <= 2.1e-8 absolute, <= 7e-5 of the smaller disk; at external tangency |area| <= 2.4e-9, of either sign; flux
 <= 0.013 ppm).
 Both pinned by `test_eclipse_degenerate_geometry` (fails with either fix reverted).
+
+## 34. `er_fast()` returns er = 1 just outside internal tangency on the stellar limb - OPEN
+
+Severity: low (a band of width ~1e-7 r_moon in the planet-moon distance), but the moon's whole deficit is lost
+Location: `pandoramoon/overlap_analytic.py`, `er_fast()` (the three-circle area used by `eclipse()` on the limb)
+Found 2026-11-14 while testing the GPU eclipse kernel against the CPU.
+
+With the planet inside a larger moon disk and the moon on the stellar limb, at d = (r_moon - r_planet) + delta
+with delta ~ 1e-12 ... 1e-6 r_moon, `er_fast` often returns 1.0 (moon fully eclipsed) instead of a value near the
+two-circle ratio (e.g. 1.0 vs 0.31 at r_p 0.130, r_m 0.234, delta 4e-10): `eclipse()` then sets the moon flux to 1.
+Fraction of random limb draws wrong by > 0.01 in er: delta ~ 1e-12 r_m: 0.5 %, 1e-10: 12 %, 1e-9: 17 %, 1e-8:
+7.5 %, 1e-7: 0.15 %, 1e-4: 0; delta ~ 1e-14 r_m and a few probes at delta = 0 were correct. The GPU's er3
+is correct there (same geometry: GPU 1.20e-2, CPU 0, CPU with d moved by 1e-6 relative 1.20e-2). Probably the
+two planet-moon crossings, ~sqrt(delta) apart, are classified inconsistently; not investigated further.
 
 ## Known limitations (documented, not bugs)
 

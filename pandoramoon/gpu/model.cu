@@ -210,8 +210,10 @@ __device__ __forceinline__ float eclipse_dm(float dm, float xp, float yp, float 
                                             bool on_limb) {
     float d = sqrtf(d2), zm = sqrtf(zm2);
     if (kp - km > d) return 0.f;                       // moon fully behind the planet: er = 1
-    float km2 = km * km, kp2 = kp * kp, A, sdist;
-    if (d <= km - kp) { A = PI_F * kp2; sdist = 0.f; }
+    float km2 = km * km, kp2 = kp * kp, A, proj;    // proj = (c - m) . r_hat_m z_m, c the overlap centroid
+    // planet inside the moon disk: the overlap is the planet disk, c = p (no division by d: d = 0 gave 0 / 0 = NaN,
+    // and the clamp below then returned a moon deficit of 0; Pandora bug #32)
+    if (d <= km - kp) { A = PI_F * kp2; proj = (xp - xm) * xm + (yp - ym) * ym; }
     else {
         float a = (d2 + kp2 - km2) / (2.f * d);
         float h = sqrtf(fmaxf(kp2 - a * a, 0.f));
@@ -220,7 +222,8 @@ __device__ __forceinline__ float eclipse_dm(float dm, float xp, float yp, float 
         float A_m = km2 * acosf(fminf(fmaxf(b / km, -1.f), 1.f)) - b * h;
         A = A_p + A_m;
         if (!(A > 0.f)) return dm;
-        sdist = d * A_m / A;
+        float sdist = d * A_m / A;
+        proj = (sdist - d) * ((xm - xp) * xm + (ym - yp) * ym) / d;     // d > |kp - km| >= 0 here
     }
     float er = A / (PI_F * km2);
     if (EXACT && on_limb) er = er3(xp, yp, kp, xm, ym, km);
@@ -229,8 +232,7 @@ __device__ __forceinline__ float eclipse_dm(float dm, float xp, float yp, float 
     if (er < 1.f && zm < 1.f) {
         float wt = fminf(1.f, (1.f - zm) / km);
         float mu = sqrtf(1.f - zm2);
-        float e_dot_m = ((xm - xp) * xm + (ym - yp) * ym) / d;
-        float grad = -(u1 + 2.f * u2 * (1.f - mu)) / mu * (sdist - d) * e_dot_m;
+        float grad = -(u1 + 2.f * u2 * (1.f - mu)) / mu * proj;
         dmn -= wt * A * grad * inv_f0;
     }
     return dmn > 0.f ? dmn : 0.f;
@@ -1321,4 +1323,18 @@ extern "C" __global__ void t_er3(const float* __restrict__ X, int m, float* __re
     if (i >= m) return;
     const float* x = X + 6 * i;
     OUT[i] = er3(x[0], x[1], x[2], x[3], x[4], x[5]);
+}
+
+// moon deficit after the planet-moon overlap (eclipse_dm, as the likelihood calls it) at rows
+// X[i] = (xp, yp, xm, ym, kp, km, dm, u1, u2), dm the moon's deficit before the overlap
+extern "C" __global__ void t_eclipse_dm(const float* __restrict__ X, int m, float* __restrict__ OUT) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= m) return;
+    const float* x = X + 9 * i;
+    float xp = x[0], yp = x[1], xm = x[2], ym = x[3], kp = x[4], km = x[5], u1 = x[7], u2 = x[8];
+    float ddx = xm - xp, ddy = ym - yp, dd2 = fmaf(ddx, ddx, ddy * ddy);
+    float zm2 = fmaf(xm, xm, ym * ym), zp2 = fmaf(xp, xp, yp * yp);
+    bool on_limb = fabsf(1.f - sqrtf(zm2)) < km || fabsf(1.f - sqrtf(zp2)) < kp;
+    float inv_f0 = 1.f / (PI_F * (1.f - u1 * (1.f / 3.f) - u2 * (1.f / 6.f)));
+    OUT[i] = eclipse_dm<true>(x[6], xp, yp, xm, ym, dd2, kp, km, zm2, zp2, u1, u2, inv_f0, on_limb);
 }

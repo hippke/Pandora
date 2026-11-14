@@ -52,6 +52,47 @@ def test_er3():
     return f"deficit-scale max {dd.max():.2e}, |d er| 99.9% {np.quantile(np.abs(g - ref)[ok], 0.999):.2e}"
 
 
+def test_eclipse_dm():
+    """eclipse_dm (moon deficit after the planet-moon overlap, T4 term included) against the CPU eclipse() on
+    random overlaps of every kind (partial, planet inside the moon disk, moon behind the planet), on the star
+    and on the limb, and at d = 0 (planet concentric with a larger moon disk: 0 / 0 gave a moon deficit of 0,
+    Pandora bug #32). Exact tangencies are left out (FP32 lens area ill-conditioned; CPU limb er too, BUGS.md)."""
+    from pandoramoon.eclipse import eclipse
+    from pandoramoon.occult import occult_hybrid
+    from pandoramoon.gpu.likelihood import eclipse_dm
+    rng = np.random.default_rng(5)
+    rows, kind = [], []
+    while len(rows) < 12000:
+        rp, rm = np.exp(rng.uniform(np.log(0.005), np.log(0.25), 2))
+        zm = rng.uniform(0, 0.9) if rng.uniform() < 0.5 else rng.uniform(0.9, 1.05)
+        ph, th = rng.uniform(0, 2 * np.pi, 2)
+        xm, ym = zm * np.cos(ph), zm * np.sin(ph)
+        k = int(rng.integers(0, 3))
+        lo, hi = abs(rp - rm), rp + rm
+        d = (rng.uniform(lo + 1e-4 * hi, hi * (1 - 1e-4)), rng.uniform(0, lo * (1 - 1e-4)), 0.0)[k]
+        q1, q2 = rng.uniform(size=2)
+        u1, u2 = 2 * np.sqrt(q1) * q2, np.sqrt(q1) * (1 - 2 * q2)
+        dm = 1 - occult_hybrid(np.array([zm]), rm, u1, u2)[0]
+        if dm > 0:
+            rows.append((xm + d * np.cos(th), ym + d * np.sin(th), xm, ym, rp, rm, dm, u1, u2))
+            kind.append(k)
+    X = np.array(rows, dtype=np.float32).astype(np.float64)     # the CPU gets the GPU's (FP32) inputs
+    kind = np.array(kind)
+    g = eclipse_dm(X).astype(np.float64)
+    a = np.array
+    c = np.array([1 - eclipse(a([x[0]]), a([x[1]]), a([x[2]]), a([x[3]]), x[4], x[5], a([1 - x[6]]), x[7], x[8])[0]
+                  for x in X])
+    err = np.abs(g - c)
+    msg = []
+    for k, nm in enumerate(("partial", "inside", "d = 0")):
+        e = err[kind == k].max()
+        assert e <= 1e-6, f"{nm}: max |dm_gpu - dm_cpu| {e:.2e}"
+        msg.append(f"{nm} {e:.1e}")
+    d0 = (kind == 2) & (c > 0)          # d = 0 with a larger moon disk (else the moon is hidden: 0)
+    assert d0.sum() > 1000 and np.all(g[d0] > 0.5 * c[d0]), "d = 0: moon deficit lost"
+    return "max |dm_gpu - dm_cpu| " + ", ".join(msg)
+
+
 def test_loglike_tutorial():
     import pandoramoon as pandora
     from pandoramoon.sampling import _thetas, LOGZERO
@@ -352,7 +393,7 @@ def test_fp64_lint():
     return f"{n} FP64 arithmetic instructions in loglike (limit {F64_LOGLIKE_MAX})"
 
 
-TESTS = [test_fp64_lint, test_deficit, test_er3, test_loglike_tutorial, test_long_kepler, test_long_baseline, test_edge_cases,
+TESTS = [test_fp64_lint, test_deficit, test_er3, test_eclipse_dm, test_loglike_tutorial, test_long_kepler, test_long_baseline, test_edge_cases,
          test_transform, test_eccentric_moon]
 
 if __name__ == "__main__":
