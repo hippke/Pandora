@@ -190,14 +190,18 @@ def moon_reach(per_bary=None, per_moon_max=None, M_planet_max=None, M_star=M_SUN
     return float(a_moon / (2 * math.pi * a / P))
 
 
-def running_sigma(time, flux, window=2.0):
+def running_sigma(time, flux, window=2.0, mask=None):
     """White-noise level at each point [flux units]: the robust point-to-point scatter (1.4826 MAD of neighbour
     differences / sqrt 2) in blocks of `window` days, interpolated. Neighbour differences do not see slow signals
-    (transits' flat parts, moons, stellar trends), so this also works inside the transits. Differences across gaps
+    (moons, stellar trends), but they do see a transit's ingress and egress: a deep transit's steep steps raise the
+    block median by 15-23 % within a day of the transit (PLATO-like light curves with 8000-12000 ppm transits).
+    mask: points to leave out (the transits); the estimate is interpolated across them. Differences across gaps
     (> 1.5 cadences) are not used."""
     t = np.asarray(time, dtype=float)
     f = np.asarray(flux, dtype=float)
     ok = np.isfinite(t) & np.isfinite(f)
+    if mask is not None:
+        ok &= ~np.asarray(mask, dtype=bool)
     t, f = t[ok], f[ok]
     dt = np.diff(t)
     cad = float(np.median(dt))
@@ -280,7 +284,10 @@ def prepare_lightcurve(time, flux, t0, period, duration, mask=None, window=None,
         raise ValueError('noise must be "global", "local" or "auto"')
     fin = np.isfinite(flat)
     sig_t = np.full(len(t), np.nan)
-    sig_t[fin] = running_sigma(t[fin], flat[fin], float(_PREP.get("noise_window", 2.0)))
+    # the transits (and one cadence on either side) left out of the noise estimate
+    cad = float(np.median(np.diff(t)))
+    in_tr = np.abs(ph) < 0.5 * duration + cad
+    sig_t[fin] = running_sigma(t[fin], flat[fin], float(_PREP.get("noise_window", 2.0)), mask=in_tr[fin])
     if noise == "auto":
         p10, p90 = np.nanpercentile(sig_t, [10, 90])
         noise = "local" if p90 > float(_PREP.get("noise_vary", 1.3)) * p10 else "global"
