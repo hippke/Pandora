@@ -77,15 +77,15 @@ See the [characterisation tutorial](https://github.com/hippke/Pandora/blob/main/
 Two tutorials (synthetic data with stellar variability and red noise, detrending with wotan, injection and retrieval) show the whole workflow for first-time users: [detection](https://github.com/hippke/Pandora/blob/main/examples/tutorial_detection.ipynb) (a fast test, seconds per light curve) and [characterisation](https://github.com/hippke/Pandora/blob/main/examples/tutorial_characterisation.ipynb) (the full fit).
 
 ```
-lc = pandora.prepare_lightcurve(time, flux, t0=t0, period=P, duration=T14)   # wotan biweight, mask 1.0 / window 4.0 T14; errors with the red-noise factor
+priors = pandora.default_priors(t0_bary=t0, per_bary=P, r_planet=0.1)        # calibrated moon priors; planet mass from the radius unless given
+lc = pandora.prepare_lightcurve(time, flux, t0=t0, period=P, duration=T14, priors=priors)   # wotan biweight, mask 1.0 / window 4.0 T14; fit windows cover the moon's reach; errors sigma(t) x beta
 like = pandora.Likelihood(lc["time"], lc["flux"], lc["flux_err"], epoch_distance=P)
-priors = pandora.default_priors(t0_bary=t0, per_bary=P, r_planet=0.1)        # calibrated moon priors
 det = pandora.detect(like, priors)              # dlnz, candidate (dlnz > 3 and the moon seen in >= 2 transits)
 results = pandora.NestedSampler(like, priors).run()    # full fit; 30-min data are supersampled automatically
 ```
 
 ### On an NVIDIA GPU, and with simultaneous GP detrending
-`NestedSampler(..., device="gpu")` runs the planet+moon fit on an NVIDIA GPU (`pip install pandoramoon[gpu]`; FP32 kernels, validated against the FP64 CPU model). On a consumer RTX 5060 the [GPU tutorial](https://github.com/hippke/Pandora/blob/main/examples/tutorial_characterisation_gpu.ipynb) fit takes 36 s instead of 164 s on all 32 threads of a Ryzen 9 7950X; on real Kepler light curves the likelihood is 6-10x faster than on that CPU. Scope: circular planet orbits, moon eccentricity <= 0.9.
+`NestedSampler(..., device="gpu")` runs the planet+moon fit on an NVIDIA GPU (`pip install "pandoramoon[gpu]"`, which brings the CUDA 13 runtime as pip wheels; for drivers older than CUDA 13 add `pip install "numba-cuda[cu12]"`; FP32 kernels, validated against the FP64 CPU model). On a consumer RTX 5060 the [GPU tutorial](https://github.com/hippke/Pandora/blob/main/examples/tutorial_characterisation_gpu.ipynb) fit takes 36 s instead of 164 s on all 32 threads of a Ryzen 9 7950X; on real Kepler light curves the likelihood is 6-10x faster than on that CPU. Scope: circular planet orbits, moon eccentricity <= 0.9.
 
 `Likelihood(time, flux, flux_err, ..., gp=GP(amp, tau, err_scale))` fits the raw light curve as transit model + Gaussian process + white noise instead of detrending it first (**experimental**). The GP is an SHO kernel with fixed hyperparameters (estimate them with `GP.fit` on the data outside the transits), computed exactly by a Kalman filter on the CPU and the GPU; the planet-only model uses the same GP. The [GP tutorial](https://github.com/hippke/Pandora/blob/main/examples/tutorial_characterisation_GP.ipynb) shows a case where a masked biweight filter produces a false moon and the GP does not.
 

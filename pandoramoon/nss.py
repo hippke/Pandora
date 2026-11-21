@@ -58,6 +58,22 @@ INIT_VERSION = 2   # 2: rejection init above the LOGZERO plateau by default (Rou
 PLATEAU = -1e299  # logL at or below this is the LOGZERO plateau (outside the prior; sampling.LOGZERO = -1e300)
 
 
+
+def max_threads():
+    """the most threads numba may use in this process: NUMBA_NUM_THREADS (default: the cores this process may run
+    on, e.g. under taskset, SLURM or a container limit, not os.cpu_count())"""
+    import numba
+    return int(numba.config.NUMBA_NUM_THREADS)
+
+
+def set_threads(threads):
+    """numba.set_num_threads, clamped to 1 ... max_threads() (numba raises ValueError beyond its limit, e.g. for
+    threads=8 on a node with 4 allocated cores, or with NUMBA_NUM_THREADS set lower than the default threads)"""
+    import numba
+    n = max(1, min(int(threads), max_threads()))
+    numba.set_num_threads(n)
+    return n
+
 def make_sampler(ll_u, parallel, with_data=False):
     """compiled sampler for ll_u. with_data=False: ll_u(u); with_data=True: ll_u(u, D) with a data tuple D passed
     through run(data=D), so ONE compiled sampler serves many data sets (no recompilation per light curve)."""
@@ -519,7 +535,7 @@ def run(ll_u, ndim, wrapped=None, nlive=1000, nsteps=None, K=None, k=1, frac_rem
     parallel = k > 1
     assert 1 <= k <= nlive // 4, "k (points replaced per iteration) must be <= nlive / 4"
     if threads is not None:
-        numba.set_num_threads(threads)
+        set_threads(threads)
     ns, init = make_sampler(ll_u, parallel, data is not None)
     D = data if data is not None else (0,)
     wrapped = np.array(wrapped if wrapped is not None else [False] * ndim, dtype=np.bool_)
@@ -719,7 +735,7 @@ def fit_is(ll_u, ndim, wrapped=None, data=None, threads=12, seed=1, lz_tol=0.2, 
     t0 = time.perf_counter()
     if wrapped is not None and any(wrapped):
         return dict(ok=False, reason="wrapped dimensions", ncall=0, wall=0.0)
-    numba.set_num_threads(max(1, int(threads)))
+    set_threads(threads)
     nl = int(S["pilot_nlive"])
     npil = max(1, int(S["pilot_runs"]))
     # pilot: npil runs in parallel threads (compiled once outside the threads, as in fit), merged as one run

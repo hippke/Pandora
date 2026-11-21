@@ -22,7 +22,7 @@ from pandoramoon.likelihood import Likelihood
 from pandoramoon.pandora import pandora_flux
 from pandoramoon.sampling import LOGZERO, LogUniform, Normal, Prior, Uniform, _loglike, _Model  # noqa: F401
 
-from pandoramoon.constants import R_SUN, M_SUN, M_JUP, G, DAY  # noqa: E402  (physics.cfg)
+from pandoramoon.constants import R_SUN, M_SUN, M_JUP, G, DAY, R_EARTH, M_EARTH  # noqa: E402  (physics.cfg)
 
 from pandoramoon._config import settings as _settings  # noqa: E402
 
@@ -47,8 +47,24 @@ JACK_MIN = float(_DET["jack_min"])
 
 # ------------------------------------------------------------------------------------------------ priors
 
+def planet_mass_estimate(r_planet, R_star=R_SUN):
+    """A planet mass [kg] for a radius r_planet [R_star]: the mean mass-radius relation of Chen & Kipping (2017;
+    Terran R = 1.008 M^0.279 below 2.04 M_earth, Neptunian R = 0.808 M^0.589 above, in Earth units) for planets up to
+    giant_radius_rearth (settings.cfg [priors], 8 R_earth); a Jupiter mass for larger ones (gas giants of 0.1-10 M_jup
+    all have about Jupiter's radius, so the radius does not tell the mass). The relation scatters by ~50 % in mass:
+    use it as a prior centre, not as a measurement."""
+    R = float(r_planet) * float(R_star) / R_EARTH
+    if R >= float(_PRI["giant_radius_rearth"]):
+        return M_JUP
+    if R < 1.008 * 2.04 ** 0.279:
+        m = (R / 1.008) ** (1 / 0.279)
+    else:
+        m = (R / 0.808) ** (1 / 0.589)
+    return m * M_EARTH
+
+
 def default_priors(t0_bary, per_bary, r_planet, per_bary_err=None, a_bary=None, R_star=R_SUN, M_star=M_SUN,
-                   M_planet=M_JUP, t0_halfwidth=None, per_moon_max=None):
+                   M_planet=None, t0_halfwidth=None, per_moon_max=None):
     """Standard priors for a moon search around a known planet (the priors of the first-look calibration,
     scaled to the planet). Returns a dict for NestedSampler / detect; change any entry as needed.
 
@@ -60,12 +76,22 @@ def default_priors(t0_bary, per_bary, r_planet, per_bary_err=None, a_bary=None, 
         around Kepler's law forces a wrong transit duration on the planet-only model whenever the catalogue star or
         a circular orbit is wrong, and the moon model then fakes a moon.)
     R_star [m], M_star [kg], M_planet [kg]: estimates; priors R_star 0.8 ... 1.2 x, M_planet 0.5 ... 1.5 x.
-    Moon: r_moon 0.1 ... 0.7 r_planet, per_moon 0 ... per_moon_max (default 0.19 per_bary: the period at the
-    planet's Hill radius), tau 0 ... 1, Omega 0 ... 180 deg, i 0 ... 180 deg, M_moon 0 ... 0.5 M_planet.
+    M_planet=None (default): estimated from r_planet x R_star (planet_mass_estimate: Chen & Kipping 2017 below
+    8 R_earth, a Jupiter mass above; a note is printed for small planets). Give your own estimate if you have one.
+    Moon: r_moon 0.1 ... 0.7 r_planet, per_moon 0 ... per_moon_max (default 0.19 per_bary: the period at ~0.48 Hill
+    radii, the stability limit of prograde moons; the Hill radius itself corresponds to 0.577 per_bary), tau 0 ... 1,
+    Omega 0 ... 180 deg, i 0 ... 180 deg, M_moon 0 ... 0.5 M_planet. moon_reach(priors) gives how far from the
+    planet such a moon can transit: the fit windows must cover it (prepare_lightcurve(..., priors=priors)).
 
     The Bayes factor depends on the moon priors (their volume sets the Occam penalty); the detection threshold of
     detect() was calibrated with priors of this kind. The factors are in settings.cfg [priors]."""
     Q = _PRI
+    if M_planet is None:
+        M_planet = planet_mass_estimate(r_planet, R_star)
+        if M_planet != M_JUP:
+            print(f"default_priors: M_planet estimated from the radius ({float(r_planet) * R_star / R_EARTH:.2f} "
+                  f"R_earth -> {M_planet / M_EARTH:.1f} M_earth, Chen & Kipping 2017); prior "
+                  f"{Q['M_planet_lo']:g} ... {Q['M_planet_hi']:g} x. Give M_planet= to override.")
     P = float(per_bary)
     dP = max(Q["per_bary_err_sigmas"] * float(per_bary_err or 0.0), Q["per_bary_min_frac"] * P)
     a_wide = None
@@ -138,8 +164,57 @@ def cadence_times(like):
     return like.time[: n * k].reshape(n, k).mean(axis=1)
 
 
+def moon_reach(per_bary=None, per_moon_max=None, M_planet_max=None, M_star=M_SUN, priors=None):
+    """How far from its planet [d of the planet's motion] a moon allowed by the priors can transit: the moon's
+    semi-major axis at the longest prior period around the heaviest prior planet, over the planet's orbital speed
+    (circular orbit; Kepler's law with M_star). priors: a dict from default_priors (per_bary, per_moon and M_planet
+    are read from it); else give per_bary and optionally per_moon_max (default: per_moon_hill x per_bary) and
+    M_planet_max (default: M_planet_hi x M_jup, the default prior). The fit windows of prepare_lightcurve must be at
+    least this wide (plus the transit), or a moon's dip can fall outside the data."""
+    def hi(x):
+        return float(x.hi) if isinstance(x, Prior) and hasattr(x, "hi") else float(x)
+
+    def mid(x):
+        return 0.5 * (float(x.lo) + float(x.hi)) if isinstance(x, Prior) and hasattr(x, "hi") else float(x)
+    if priors is not None:
+        per_bary = mid(priors["per_bary"])
+        per_moon_max = hi(priors["per_moon"])
+        M_planet_max = hi(priors["M_planet"])
+    if per_bary is None:
+        raise ValueError("moon_reach: give per_bary or priors")
+    P = float(per_bary)
+    pm = float(per_moon_max) if per_moon_max is not None else _PRI["per_moon_hill"] * P
+    Mp = float(M_planet_max) if M_planet_max is not None else _PRI["M_planet_hi"] * M_JUP
+    a = (G * (M_star + Mp) * (P * DAY) ** 2 / (4 * math.pi ** 2)) ** (1 / 3)
+    a_moon = (G * Mp * (pm * DAY) ** 2 / (4 * math.pi ** 2)) ** (1 / 3)
+    return float(a_moon / (2 * math.pi * a / P))
+
+
+def running_sigma(time, flux, window=2.0):
+    """White-noise level at each point [flux units]: the robust point-to-point scatter (1.4826 MAD of neighbour
+    differences / sqrt 2) in blocks of `window` days, interpolated. Neighbour differences do not see slow signals
+    (transits' flat parts, moons, stellar trends), so this also works inside the transits. Differences across gaps
+    (> 1.5 cadences) are not used."""
+    t = np.asarray(time, dtype=float)
+    f = np.asarray(flux, dtype=float)
+    ok = np.isfinite(t) & np.isfinite(f)
+    t, f = t[ok], f[ok]
+    dt = np.diff(t)
+    cad = float(np.median(dt))
+    g = dt < 1.5 * cad
+    d = (np.abs(np.diff(f)) / math.sqrt(2.0))[g]
+    td = (0.5 * (t[1:] + t[:-1]))[g]
+    # at least 400 differences per block: the MAD scatters by ~6 % then, so a constant noise level reads as constant
+    n = max(400, int(round(window / cad)))
+    nb = max(1, len(d) // n)
+    edges = np.linspace(0, len(d), nb + 1).astype(int)
+    tc = np.array([td[a:b].mean() for a, b in zip(edges[:-1], edges[1:])])
+    sc = np.array([1.4826 * np.median(d[a:b]) for a, b in zip(edges[:-1], edges[1:])])
+    return np.interp(np.asarray(time, dtype=float), tc, sc)
+
+
 def prepare_lightcurve(time, flux, t0, period, duration, mask=None, window=None, method=None,
-                       fit_halfwidth=None, inflate_beta=True):
+                       fit_halfwidth=None, inflate_beta=True, noise=None, priors=None):
     """Detrend a light curve around known transits and estimate its noise (needs wotan, ``pip install wotan``).
 
     time [d], flux: the light curve (e.g. Kepler PDCSAP, normalised or not). t0 [d], period [d], duration [d]:
@@ -148,14 +223,26 @@ def prepare_lightcurve(time, flux, t0, period, duration, mask=None, window=None,
     window of window x T14. Defaults 1.0 / 4.0: the best setting of the detrending study (300 injected planet+moon
     systems in 10 quiet Kepler stars; robust to T14 errors of -20 ... +25 %). Points where wotan has no trend (e.g.
     near gaps) are dropped, not interpolated.
-    fit_halfwidth [d]: the fit windows are t0 + k period +- fit_halfwidth (default (mask / 2 + 1) T14); increase it
-    for moons that may transit further from the planet.
-    Noise: sigma = the robust scatter (MAD) of the detrended flux 1 ... 11 T14 beyond the fit windows (signal-free),
-    beta = the red-noise factor of the same points on bins of T14 / 4 (Pont, Zucker & Queloz 2006), >= 1.
+    fit_halfwidth [d]: the fit windows are t0 + k period +- fit_halfwidth. Default: the larger of (mask / 2 + 1) T14
+    and the moon prior's reach + 1 T14 (moon_reach(priors=priors), or of the default priors of a Jupiter-mass planet
+    if priors is None; settings.cfg [prepare] reach_windows). Long-period planets need wide windows: +-2.7 d for a
+    one-year Jupiter around the Sun instead of +-0.9 d.
+    noise: "global", "local" or "auto" (default, settings.cfg [prepare]).
+      global: sigma = the robust scatter (MAD) of the detrended flux 1 ... 11 T14 beyond the fit windows
+        (signal-free), beta = the red-noise factor of the same points on bins of T14 / 4 (Pont, Zucker & Queloz 2006),
+        >= 1. flux_err = sigma x beta.
+      local: sigma(t) = running_sigma (the point-to-point scatter in blocks of noise_window days, >= 400 points),
+        beta from all detrended data more than 1 T14 beyond the fit windows, divided by sigma(t); flux_err = sigma(t)
+        x beta. For light curves whose noise changes with time (e.g. PLATO quarters, Kepler modules), where one sigma
+        gives some transits too much weight, and for long light curves, where beta from 1 ... 11 T14 alone rests on
+        ~100 bins and a single bin can change it by 20 %.
+      auto: local if sigma(t) varies by more than noise_vary (ratio of its 90th and 10th percentiles), else global.
     flux_err = sigma x beta if inflate_beta else sigma.
 
-    Returns a dict: time, flux, flux_err (the fit windows, for Likelihood), sigma, beta, epochs (transit numbers
-    with data), and for plots: time_all, flux_all (input), trend, flat (detrended), in_window (boolean).
+    Returns a dict: time, flux, flux_err (the fit windows, for Likelihood), sigma (the median of sigma(t) for
+    local noise), beta, noise ("global" / "local"), sigma_t (local: sigma(t) at the fit-window points), moon_reach,
+    epochs (transit numbers with data), and for plots: time_all, flux_all (input), trend, flat (detrended),
+    in_window (boolean).
     Defaults (mask, window, method, noise windows, beta bins): settings.cfg [prepare]."""
     mask = float(_PREP["mask"]) if mask is None else float(mask)
     window = float(_PREP["window"]) if window is None else float(window)
@@ -176,23 +263,57 @@ def prepare_lightcurve(time, flux, t0, period, duration, mask=None, window=None,
     if method == "cosine":
         kw["robust"] = True
     flat, trend = flatten(t, f, **kw)
-    half = float(fit_halfwidth) if fit_halfwidth is not None else (0.5 * mask + 1.0) * duration
+    reach = moon_reach(per_bary=period, priors=priors)
+    if fit_halfwidth is not None:
+        half = float(fit_halfwidth)
+    else:
+        half = (0.5 * mask + 1.0) * duration
+        if str(_PREP.get("reach_windows", "true")).lower() in ("1", "true", "yes"):
+            half = max(half, reach + float(_PREP.get("reach_margin", 1.0)) * duration)
     win = (np.abs(ph) < half) & np.isfinite(flat)
     g0, g1 = _PREP["noise_gap"] * duration, (_PREP["noise_gap"] + _PREP["noise_span"]) * duration
     far = np.isfinite(flat) & (np.abs(ph) > half + g0) & (np.abs(ph) < half + g1)
     if far.sum() < 50:
         far = np.isfinite(flat) & (np.abs(ph) > half)
+    noise = str(_PREP.get("noise", "global")) if noise is None else str(noise)
+    if noise not in ("global", "local", "auto"):
+        raise ValueError('noise must be "global", "local" or "auto"')
+    fin = np.isfinite(flat)
+    sig_t = np.full(len(t), np.nan)
+    sig_t[fin] = running_sigma(t[fin], flat[fin], float(_PREP.get("noise_window", 2.0)))
+    if noise == "auto":
+        p10, p90 = np.nanpercentile(sig_t, [10, 90])
+        noise = "local" if p90 > float(_PREP.get("noise_vary", 1.3)) * p10 else "global"
+    if noise == "local":
+        # sigma(t) makes the noise stationary, so beta can use all data outside the windows (thousands of bins
+        # instead of ~100 within 11 T14: one 3-h bin at -6 sigma moved beta from 1.12 to 1.37 on a PLATO-like
+        # light curve, depending on whether one boundary point was in the noise region)
+        far = np.isfinite(flat) & np.isfinite(sig_t) & (np.abs(ph) > half + g0)
     r = flat[far] - np.median(flat[far])
-    sig = 1.4826 * float(np.median(np.abs(r)))
+    s_far = sig_t[far] if noise == "local" else np.full(int(far.sum()), 1.4826 * float(np.median(np.abs(r))))
+    sig = float(np.median(s_far))
     beta = 1.0
     key = np.floor((t[far] - t[far].min()) / (duration / _PREP["beta_bins_per_t14"])).astype(np.int64)
     _, inv, cnt = np.unique(key, return_inverse=True, return_counts=True)
     mb = cnt >= 3
     if mb.sum() > 10:
-        binned = np.bincount(inv, weights=r)[mb] / cnt[mb]
-        beta = max(1.0, float(np.sqrt(np.mean(binned ** 2 / (sig ** 2 / cnt[mb])))))
-    err = sig * beta if inflate_beta else sig
+        # weighted bin means of r / sigma, in units of their white-noise error (global: as before)
+        w = 1.0 / s_far ** 2
+        zb = np.bincount(inv, weights=r * w)[mb] / np.bincount(inv, weights=w)[mb] * \
+            np.sqrt(np.bincount(inv, weights=w)[mb])
+        beta = max(1.0, float(np.sqrt(np.mean(zb ** 2))))
+    if noise == "local":
+        err = sig_t[win] * (beta if inflate_beta else 1.0)
+    else:
+        err = np.full(int(win.sum()), sig * beta if inflate_beta else sig)
     warn = []
+    if noise == "global":
+        p10, p90 = np.nanpercentile(sig_t, [10, 90])
+        if p90 > float(_PREP.get("noise_vary", 1.3)) * p10:
+            warn.append(f"the noise level changes with time (sigma(t) {1e6 * p10:.0f} ... {1e6 * p90:.0f} ppm, 10-90 %): "
+                        "one sigma gives some transits too much weight and inflates beta; use noise='local'")
+            import warnings
+            warnings.warn(warn[-1], stacklevel=2)
     if beta > _PREP["beta_warn"]:
         warn.append(f"red-noise factor beta = {beta:.2f} (> {_PREP['beta_warn']}): strong correlated noise (active or "
                     f"noisy star, or poor detrending). With inflate_beta the errors grow by beta, which lowers a moon's "
@@ -201,10 +322,11 @@ def prepare_lightcurve(time, flux, t0, period, duration, mask=None, window=None,
         import warnings
         warnings.warn(warn[-1], stacklevel=2)
     epochs = np.unique(np.round((t[win] - t0) / period).astype(int))
-    return dict(time=t[win], flux=flat[win], flux_err=np.full(int(win.sum()), err), sigma=sig, beta=beta,
+    return dict(time=t[win], flux=flat[win], flux_err=err, sigma=sig, beta=beta, noise=noise,
+                sigma_t=sig_t[win] if noise == "local" else None, moon_reach=reach,
                 epochs=epochs.tolist(), time_all=t, flux_all=f, trend=trend, flat=flat, in_window=win, warnings=warn,
                 settings=dict(mask=mask, window=window, method=method, fit_halfwidth=half, duration=duration,
-                              inflate_beta=inflate_beta))
+                              inflate_beta=inflate_beta, noise=noise))
 
 
 # ---------------------------------------------------------------------------------------- jackknife
@@ -324,7 +446,7 @@ def detect(likelihood, priors, recall=0.95, threshold=None, seed=1, jack_min=Non
                        kpair=4, data=m.D)
     jobs = [(mp, st["nlive_planet"], st["nsteps_planet"], seed)]
     jobs += [(mm, st["nlive_moon"], st["nsteps_moon"], seed + 7 + 101 * j) for j in range(st["repeats"])]
-    nth = max(1, min(len(jobs), int(threads) if threads else (os.cpu_count() or 1)))
+    nth = max(1, min(len(jobs), int(threads) if threads else nss.max_threads()))
     if nth > 1:
         from concurrent.futures import ThreadPoolExecutor
         nss.make_sampler(mm.ll, False, True)         # one sampler for all threads (numba releases the GIL in it)

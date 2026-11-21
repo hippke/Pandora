@@ -744,8 +744,10 @@ def _thin(w, max_n, seed=0):
 def _fit_model(m, nss_kw, store, resume_mode, settings_hash, verbose, label, max_weighted=None, progress=False,
                hash_parts=None):
     """one nss.fit of a _Model, with the run store / resume; returns the UltraNest-like result dict"""
+    import threading
     resume = None
     callback = None
+    acc = dict(t0=time.perf_counter(), ncall=0, base_wall=0.0, base_ncall=0, lock=threading.Lock())
     if store is not None:
         st = store.read_state()
         if resume_mode == "resume" and st is not None:
@@ -773,15 +775,27 @@ def _fit_model(m, nss_kw, store, resume_mode, settings_hash, verbose, label, max
                 os.remove(path)
             store.write_state(dict(hash=settings_hash, hash_parts=hash_parts or {}, N=None, nesc=0))
 
+        # cumulative cost over all sessions of this fit (a resumed fit reports what the stored runs cost)
+        st_prev = st or {}
+        acc.update(base_wall=float(st_prev.get("wall_total", 0.0)) if resume is not None else 0.0,
+                   base_ncall=int(st_prev.get("ncall_total", 0)) if resume is not None else 0)
+
         def callback(event, **kw):
             if event == "run":
                 _save_run(store.run_path(kw["nsteps"], kw["idx"]), kw["r"])
+                with acc["lock"]:
+                    acc["ncall"] += int(kw["r"].get("ncall", 0))
+                    st = store.read_state() or {}
+                    st.update(wall_total=acc["base_wall"] + time.perf_counter() - acc["t0"],
+                              ncall_total=acc["base_ncall"] + acc["ncall"])
+                    store.write_state(st)
             elif event == "state":
-                st = store.read_state() or {}
-                st.update(hash=settings_hash, N=kw["N"], nesc=kw["nesc"], nlive=kw.get("nlive"),
-                          nlesc=kw.get("nlesc", 0),
-                          skip=sorted(set(st.get("skip", [])) | set(kw.get("dropped_idx", []))))
-                store.write_state(st)
+                with acc["lock"]:
+                    st = store.read_state() or {}
+                    st.update(hash=settings_hash, N=kw["N"], nesc=kw["nesc"], nlive=kw.get("nlive"),
+                              nlesc=kw.get("nlesc", 0),
+                              skip=sorted(set(st.get("skip", [])) | set(kw.get("dropped_idx", []))))
+                    store.write_state(st)
                 gone = set(kw.get("dropped_idx", []))
                 for ns, idx, path in store.stored_runs():
                     if ns == kw["dropped"] or idx in gone:
@@ -839,9 +853,14 @@ def _fit_model(m, nss_kw, store, resume_mode, settings_hash, verbose, label, max
         n_weighted_all=int(n_weighted_all),
         run_logz=[float(q["logz"]) for q in runs], run_logzerr=[float(q["logzerr"]) for q in runs],
         run_maxL=[float(q["maxL"]) for q in runs])
+    # wall / ncall: this session; wall_total / ncall_total: all sessions of this fit (resume="resume" reuses stored
+    # runs: then wall ~ 0 and ncall = 0, and the totals say what the fit cost)
+    res.update(wall_total=acc["base_wall"] + wall, ncall_total=acc["base_ncall"] + int(r["ncall"]),
+               resumed=resume is not None)
     if store is not None:
         st = store.read_state() or {}
-        st.update(hash=settings_hash, N=int(r["nsteps"]), nesc=int(r["n_escalations"]), finished=True)
+        st.update(hash=settings_hash, N=int(r["nsteps"]), nesc=int(r["n_escalations"]), finished=True,
+                  wall_total=res["wall_total"], ncall_total=res["ncall_total"])
         store.write_state(st)
     return res
 
@@ -1046,7 +1065,8 @@ class NestedSampler:
                 threads = len(os.sched_getaffinity(0))
             except AttributeError:
                 threads = os.cpu_count() or 1
-        self.threads = int(threads)
+        # never more than numba may use (NUMBA_NUM_THREADS; set_num_threads raises beyond it)
+        self.threads = max(1, min(int(threads), nss.max_threads()))
         self.models = {}
         if planet_evidence not in ("is", "nested"):
             raise ValueError('planet_evidence must be "is" or "nested"')
@@ -1076,8 +1096,9 @@ class NestedSampler:
         """the planet+moon model's unit-cube likelihood on the GPU (pandoramoon.gpu)"""
         from pandoramoon import gpu
         from pandoramoon.gpu.sampler import PandoraEvaluator
-        if not gpu.available():
-            raise RuntimeError('device="gpu": no usable NVIDIA GPU / CUDA Python packages (pip install pandoramoon[gpu])')
+        why = gpu.unavailable_reason()
+        if why is not None:
+            raise RuntimeError(f'device="gpu": {why}')
         if getattr(self.likelihood, "gp", None) is not None and not getattr(gpu, "GP_SUPPORTED", False):
             raise NotImplementedError('device="gpu" with Likelihood(gp=...) is not implemented yet; use device="cpu"')
         p = self.priors.get("t0_bary")
@@ -1294,7 +1315,8 @@ class NestedSampler:
             sub = None if self.log_dir is None else os.path.join(self.log_dir, "gp_profile", "moon")
             S = NestedSampler(like_of(g_m), self.priors, model="moon", compare_planet=False,
                               moon_phase=self._moon_phase, ld_correlation=self.ld_correlation, log_dir=sub,
-                              resume="overwrite", threads=self.threads, seed=self.seed, verbose=False,
+                              resume=self.resume if self.resume == "resume" else "overwrite", threads=self.threads,
+                              seed=self.seed, verbose=False,
                               supersampling=None, device=self.device, gpu_options=self.gpu_options)
             r = S.run(max_weighted_samples=n_is, **getattr(self, "_run_kw", {}))
             lz_f = r["logz"]
@@ -1309,7 +1331,8 @@ class NestedSampler:
         for it in range(int(max_iter)):
             sub = None if self.log_dir is None else os.path.join(self.log_dir, "gp_profile", f"planet{it}")
             S = NestedSampler(like_of(g), self.priors, model="planet", ld_correlation=self.ld_correlation,
-                              log_dir=sub, resume="overwrite", threads=self.threads, seed=self.seed, verbose=False,
+                              log_dir=sub, resume=self.resume if self.resume == "resume" else "overwrite", threads=self.threads,
+                              seed=self.seed, verbose=False,
                               supersampling=None, planet_evidence=self.planet_evidence)
             r = S.run(max_weighted_samples=n_is)
             cand_p.append(dict(gp=repr(g), logz=r["logz"], logzerr=r["logzerr"], how=f"planet-only fit {it}"))
@@ -1389,8 +1412,11 @@ class NestedSampler:
             if r.get("method") == "importance":
                 how = (f"importance sampling, ESS {r['importance']['ess']:.0f}, {r['ncall']:,} calls, {r['wall']:.0f} s")
             else:
+                cost = f"{r.get('ncall_total', r['ncall']):,} calls, {r.get('wall_total', r['wall']):.0f} s"
+                if r.get("resumed") and r["ncall"] == 0:
+                    cost += " when it ran (reused from log_dir)"
                 how = (f"{'checks passed' if r['passed'] else 'checks NOT passed'}; {r['runs']} runs x {r['nlive']} "
-                       f"live, nsteps {r['nsteps']}, {r['ncall']:,} calls, {r['wall']:.0f} s")
+                       f"live, nsteps {r['nsteps']}, {cost}")
             print(f"{title}: logZ = {r['logz']:.3f} +- {r['logzerr']:.3f}   ({how})")
             p = r["posterior"]
             for j, n in enumerate(r["paramnames"]):

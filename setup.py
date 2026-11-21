@@ -34,7 +34,10 @@ setup(
         # videos (model.video) and plots (plot_run, plot_corner); prepare_lightcurve needs wotan
         'plots': ['matplotlib', 'tqdm', 'corner'],
         'search': ['wotan'],
-        # optional FP32 GPU backend (NVIDIA, compute capability >= 7.0; experimental, GPU_PLAN.md)
-        'gpu': ['numba-cuda', 'cuda-core', 'cuda-bindings', 'nvidia-cuda-nvrtc'],
+        # optional FP32 GPU backend (NVIDIA, compute capability >= 7.0; experimental, GPU_PLAN.md). numba-cuda's
+        # [cu13] extra brings the CUDA 13 runtime libraries (libcudart, libnvvm, nvJitLink) as pip wheels; without
+        # them numba.cuda finds no usable GPU unless a system CUDA toolkit is installed. Drivers older than CUDA 13
+        # (R580): pip install "numba-cuda[cu12]" instead.
+        'gpu': ['numba-cuda[cu13]', 'cuda-core', 'cuda-bindings', 'nvidia-cuda-nvrtc'],
         },
 )

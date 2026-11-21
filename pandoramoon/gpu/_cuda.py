@@ -13,12 +13,38 @@ _SRC = None
 
 def available():
     """True if an NVIDIA GPU and the CUDA Python packages are usable"""
+    return unavailable_reason() is None
+
+
+def unavailable_reason():
+    """None if the GPU backend is usable, else a one-line explanation with the likely fix"""
+    def why(what, e):
+        msg = str(e).splitlines()[0] if str(e) else type(e).__name__
+        if any(x in msg for x in ("libcudart", "libnvvm", "nvJitLink", "libnvrtc")):
+            fix = ('the CUDA runtime libraries are missing: pip install "numba-cuda[cu13]" ([cu12] for drivers older '
+                   'than CUDA 13), or install a CUDA toolkit')
+        else:
+            fix = 'pip install "pandoramoon[gpu]"'
+        return f"{what}: {type(e).__name__}: {msg} -> {fix}"
     try:
         import cuda.core  # noqa: F401
+    except Exception as e:
+        return why("cuda.core cannot be imported", e)
+    try:
         from numba import cuda
-        return bool(cuda.is_available())
-    except Exception:
-        return False
+    except Exception as e:
+        return why("numba-cuda cannot be imported", e)
+    try:
+        if cuda.is_available():
+            return None
+        # is_available() hides the cause; detect() raises it (its printed device list is discarded)
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()):
+            ok = cuda.detect()
+        return None if ok else "numba.cuda finds no supported NVIDIA GPU (driver missing or too old?)"
+    except Exception as e:
+        return why("numba.cuda cannot use the GPU", e)
 
 
 def _source():

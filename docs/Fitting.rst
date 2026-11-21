@@ -80,23 +80,43 @@ A search has two stages: a fast **detection** test for every light curve, and th
    if det["candidate"]:
        results = pandora.NestedSampler(like, priors).run()
 
-.. function:: prepare_lightcurve(time, flux, t0, period, duration, mask=1.0, window=4.0, method="biweight", fit_halfwidth=None, inflate_beta=True)
+.. function:: prepare_lightcurve(time, flux, t0, period, duration, mask=1.0, window=4.0, method="biweight", fit_halfwidth=None, inflate_beta=True, noise="auto", priors=None)
 
    Detrends the light curve with ``wotan`` (``method``, window ``window`` × T14) with the transits masked over
    ``mask`` × T14 (the defaults are the best setting of a study of 300 injected planet+moon systems in real Kepler
    light curves, robust to T14 errors of −20 … +25 %). Points without a trend are dropped. Keeps the fit
-   windows (±(mask/2 + 1) × T14 around each transit, or ``fit_halfwidth`` days) and measures the noise on the
-   detrended data 1–11 T14 beyond them: ``sigma`` (robust scatter) and the red-noise factor ``beta`` (on bins of
-   T14/4; Pont, Zucker & Queloz 2006). Returns ``time, flux, flux_err`` (= σ × β) for the ``Likelihood``, and
-   ``sigma, beta, epochs``, ``warnings`` and arrays for plots. If β > 2 it warns: the inflated errors lower a
-   moon's Δln Z by about β², so weak moons around active or noisy stars may be missed (in our Kepler tests β = 3.8
-   turned a clear moon, Δln Z 129 with white errors, into a non-detection).
+   windows: ±(``moon_reach`` + 1 T14) around each transit, at least ±(mask/2 + 1) × T14, or ``fit_halfwidth``
+   days. ``moon_reach`` is how far from the planet a moon of the priors (``priors``, else the default priors of a
+   Jupiter-mass planet) can transit: ±2.2 days for a one-year Jupiter around the Sun.
 
-.. function:: default_priors(t0_bary, per_bary, r_planet, per_bary_err=None, a_bary=None, R_star=R_sun, M_star=M_sun, M_planet=M_Jup, t0_halfwidth=0.05, per_moon_max=None)
+   Noise: with ``noise="global"`` it measures one ``sigma`` (robust scatter) and the red-noise factor ``beta`` (on
+   bins of T14/4; Pont, Zucker & Queloz 2006) on the detrended data 1–11 T14 beyond the windows; ``flux_err`` = σ ×
+   β. With ``noise="local"`` the errors are σ(t) × β: σ(t) is the running point-to-point scatter
+   (``running_sigma``, blocks of 2 days), β is measured on all data outside the windows divided by σ(t). ``"auto"``
+   (default) uses local noise when σ(t) varies by more than 30 % (90th / 10th percentile), e.g. between PLATO
+   quarters or Kepler modules; otherwise it is the global method as before. Returns ``time, flux, flux_err`` for
+   the ``Likelihood``, and ``sigma, beta, noise, sigma_t, moon_reach, epochs``, ``warnings`` and arrays for plots.
+   If β > 2 it warns: the inflated errors lower a moon's Δln Z by about β², so weak moons around active or noisy
+   stars may be missed (in our Kepler tests β = 3.8 turned a clear moon, Δln Z 129 with white errors, into a
+   non-detection).
+
+.. function:: moon_reach(per_bary=None, per_moon_max=None, M_planet_max=None, M_star=M_sun, priors=None)
+
+   Days of the planet's motion within which a moon allowed by the priors can transit: its largest orbit (the
+   longest prior period around the heaviest prior planet) over the planet's orbital speed.
+
+.. function:: planet_mass_estimate(r_planet, R_star=R_sun)
+
+   A planet mass from its radius: Chen & Kipping (2017) below 8 Earth radii, a Jupiter mass above (the radius of a
+   gas giant does not tell its mass). Used by ``default_priors`` when no ``M_planet`` is given.
+
+.. function:: default_priors(t0_bary, per_bary, r_planet, per_bary_err=None, a_bary=None, R_star=R_sun, M_star=M_sun, M_planet=None, t0_halfwidth=0.05, per_moon_max=None)
 
    Priors for a moon search around a known planet: planet priors around the given values and wide moon priors
-   (r_moon 0.1–0.7 × r_planet, per_moon up to the period at the Hill radius
-   ≈ 0.19 × per_bary, all orientations, M_moon up to half the planet's mass). The Bayes factor depends on the moon
+   (r_moon 0.1–0.7 × r_planet, per_moon up to 0.19 × per_bary, the period at ~0.48 Hill radii, the stability limit
+   of prograde moons (a moon at the Hill radius itself would have 0.577 × per_bary), all orientations, M_moon up to
+   half the planet's mass). Without ``M_planet`` the planet's mass is estimated from its radius
+   (``planet_mass_estimate``; a Jupiter mass for giants, as before). The Bayes factor depends on the moon
    priors; ``detect``'s threshold was calibrated with priors of this kind.
 
    **a_bary** (a/R⋆): by default log-uniform over 0.4–2.5 × the value from Kepler's law for the given star and a
@@ -395,7 +415,9 @@ GPU
 ---
 
 ``NestedSampler(..., device="gpu")`` runs the planet+moon fit on an NVIDIA GPU (``pip install pandoramoon[gpu]``:
-numba-cuda and NVIDIA's CUDA Python packages; any recent NVIDIA GPU). The likelihood is a CUDA port of Pandora's
+numba-cuda with the CUDA 13 runtime wheels (``numba-cuda[cu13]``) and NVIDIA's CUDA Python packages; any recent
+NVIDIA GPU; for drivers older than CUDA 13 add ``pip install "numba-cuda[cu12]"``). If the GPU cannot be used, the
+error message says why (e.g. missing CUDA runtime libraries) and how to fix it. The likelihood is a CUDA port of Pandora's
 model in single precision (FP32), validated against the double-precision CPU model; the sampler is the same
 ``nss`` algorithm with the same checks, its runs advanced in parallel on the GPU. The planet-only fit stays on the
 CPU and runs at the same time. Results and files are the same as for ``device="cpu"``.
