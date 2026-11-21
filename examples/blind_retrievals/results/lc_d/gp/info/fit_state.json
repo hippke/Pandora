@@ -1,0 +1,18 @@
+{
+ "hash": "66d277550a1c46cae49c02f89841474eb058bd2a",
+ "hash_parts": {
+  "data": "43ffa9d39ff75cef2c83a41c44fe79705749dcf0",
+  "data_parts": {
+   "time": "26678d3493cc",
+   "inv_var": "461693ffe8e8",
+   "lin_terms": "56261cb27ae3",
+   "tail": "9c1aed965895",
+   "gp": "50f338e70151"
+  },
+  "priors": "c648a4ea3262efc44cb81eb46a048b863a3bcc42",
+  "settings": "934dbb1c8e57019c68664ba11186e21efee8b7e3"
+ },
+ "N": 64,
+ "nesc": 0,
+ "finished": true
+}

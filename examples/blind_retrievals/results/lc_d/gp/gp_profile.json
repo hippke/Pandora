@@ -1,0 +1,64 @@
+{
+ "dlogz": -4.528604469240236,
+ "dlogzerr": 0.10542249624660126,
+ "dlogz_fixed": -4.382525436744572,
+ "moon": {
+  "gp": "GP(amp=8.59764e-06, tau=0.0954023, Q=0.707107, err_scale=1.03598, baseline='offset', gap=0.5)",
+  "logz": -1272.6565112466099,
+  "logzerr": 0.10505164947529476,
+  "ess": 13016.510715745322,
+  "how": "importance sampling"
+ },
+ "planet": {
+  "gp": "GP(amp=8.62978e-06, tau=0.0898017, Q=0.707107, err_scale=1.0415, baseline='offset', gap=0.5)",
+  "logz": -1268.1279067773696,
+  "logzerr": 0.008834798095285427,
+  "how": "planet-only fit 0"
+ },
+ "candidates_moon": [
+  {
+   "gp": "GP(amp=1.35318e-05, tau=0.00694449, Q=0.707107, err_scale=0.996389, baseline='offset', gap=0.5)",
+   "logz": -1275.9010146375822,
+   "logzerr": 0.10505164947529476,
+   "how": "fit (fixed h)"
+  },
+  {
+   "gp": "GP(amp=8.59764e-06, tau=0.0954023, Q=0.707107, err_scale=1.03598, baseline='offset', gap=0.5)",
+   "logz": -1272.6565112466099,
+   "logzerr": 0.10505164947529476,
+   "ess": 13016.510715745322,
+   "how": "importance sampling"
+  }
+ ],
+ "candidates_planet": [
+  {
+   "gp": "GP(amp=1.35318e-05, tau=0.00694449, Q=0.707107, err_scale=0.996389, baseline='offset', gap=0.5)",
+   "logz": -1271.5184892008376,
+   "logzerr": 0.009752979121791235,
+   "how": "fit (fixed h)"
+  },
+  {
+   "gp": "GP(amp=8.59764e-06, tau=0.0954023, Q=0.707107, err_scale=1.03598, baseline='offset', gap=0.5)",
+   "logz": -1268.2410669274855,
+   "logzerr": 0.009752979121791235,
+   "ess": 8296.828118173584,
+   "how": "importance sampling (moon model's h)"
+  },
+  {
+   "gp": "GP(amp=8.62978e-06, tau=0.0898017, Q=0.707107, err_scale=1.0415, baseline='offset', gap=0.5)",
+   "logz": -1268.1279067773696,
+   "logzerr": 0.008834798095285427,
+   "how": "planet-only fit 0"
+  }
+ ],
+ "planet_iterations": [
+  {
+   "gp": "GP(amp=8.62978e-06, tau=0.0898017, Q=0.707107, err_scale=1.0415, baseline='offset', gap=0.5)",
+   "logz": -1268.1279067773696,
+   "next": "GP(amp=8.64842e-06, tau=0.0903952, Q=0.707107, err_scale=1.0414, baseline='offset', gap=0.5)",
+   "step": 0.006586383414165731
+  }
+ ],
+ "ess_moon": 13016.510715745322,
+ "seconds": 15.460309531074017
+}

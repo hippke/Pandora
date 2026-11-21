@@ -1,0 +1,88 @@
+{
+ "dlogz": -3.6472366380318704,
+ "dlogzerr": 0.09168900977890851,
+ "dlogz_fixed": -2.0635291546938106,
+ "moon": {
+  "gp": "GP(amp=0.000987537, tau=115.93, Q=0.707107, err_scale=0.941584, baseline='offset', gap=0.5)",
+  "logz": -405.68160434010724,
+  "logzerr": 0.0896550974235451,
+  "ess": 10629.46047946443,
+  "how": "importance sampling"
+ },
+ "planet": {
+  "gp": "GP(amp=1.64921e-05, tau=1.07977, Q=0.707107, err_scale=0.943988, baseline='offset', gap=0.5)",
+  "logz": -402.0343677020754,
+  "logzerr": 0.019205156084015962,
+  "how": "planet-only fit 2"
+ },
+ "candidates_moon": [
+  {
+   "gp": "GP(amp=1.05309e-05, tau=0.00694449, Q=0.707107, err_scale=0.989266, baseline='offset', gap=0.5)",
+   "logz": -419.115620648216,
+   "logzerr": 0.0896550974235451,
+   "how": "fit (fixed h)"
+  },
+  {
+   "gp": "GP(amp=0.000987537, tau=115.93, Q=0.707107, err_scale=0.941584, baseline='offset', gap=0.5)",
+   "logz": -405.68160434010724,
+   "logzerr": 0.0896550974235451,
+   "ess": 10629.46047946443,
+   "how": "importance sampling"
+  }
+ ],
+ "candidates_planet": [
+  {
+   "gp": "GP(amp=1.05309e-05, tau=0.00694449, Q=0.707107, err_scale=0.989266, baseline='offset', gap=0.5)",
+   "logz": -417.0520914935222,
+   "logzerr": 0.02856614134767465,
+   "how": "fit (fixed h)"
+  },
+  {
+   "gp": "GP(amp=0.000987537, tau=115.93, Q=0.707107, err_scale=0.941584, baseline='offset', gap=0.5)",
+   "logz": -403.10877446280455,
+   "logzerr": 0.02856614134767465,
+   "ess": 919.0493070317938,
+   "how": "importance sampling (moon model's h)"
+  },
+  {
+   "gp": "GP(amp=1.85164e-05, tau=1.36604, Q=0.707107, err_scale=0.945089, baseline='offset', gap=0.5)",
+   "logz": -402.13649169407563,
+   "logzerr": 0.017149374042552325,
+   "how": "planet-only fit 0"
+  },
+  {
+   "gp": "GP(amp=1.6821e-05, tau=1.13919, Q=0.707107, err_scale=0.944194, baseline='offset', gap=0.5)",
+   "logz": -402.09220998496016,
+   "logzerr": 0.0181907358224433,
+   "how": "planet-only fit 1"
+  },
+  {
+   "gp": "GP(amp=1.64921e-05, tau=1.07977, Q=0.707107, err_scale=0.943988, baseline='offset', gap=0.5)",
+   "logz": -402.0343677020754,
+   "logzerr": 0.019205156084015962,
+   "how": "planet-only fit 2"
+  }
+ ],
+ "planet_iterations": [
+  {
+   "gp": "GP(amp=1.85164e-05, tau=1.36604, Q=0.707107, err_scale=0.945089, baseline='offset', gap=0.5)",
+   "logz": -402.13649169407563,
+   "next": "GP(amp=1.6821e-05, tau=1.13919, Q=0.707107, err_scale=0.944194, baseline='offset', gap=0.5)",
+   "step": 0.18159802010358778
+  },
+  {
+   "gp": "GP(amp=1.6821e-05, tau=1.13919, Q=0.707107, err_scale=0.944194, baseline='offset', gap=0.5)",
+   "logz": -402.09220998496016,
+   "next": "GP(amp=1.64921e-05, tau=1.07977, Q=0.707107, err_scale=0.943988, baseline='offset', gap=0.5)",
+   "step": 0.053568197972607076
+  },
+  {
+   "gp": "GP(amp=1.64921e-05, tau=1.07977, Q=0.707107, err_scale=0.943988, baseline='offset', gap=0.5)",
+   "logz": -402.0343677020754,
+   "next": "GP(amp=1.65764e-05, tau=1.09767, Q=0.707107, err_scale=0.943965, baseline='offset', gap=0.5)",
+   "step": 0.016441741966499043
+  }
+ ],
+ "ess_moon": 10629.46047946443,
+ "seconds": 27.228512409958057
+}

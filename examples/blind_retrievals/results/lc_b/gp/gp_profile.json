@@ -1,0 +1,64 @@
+{
+ "dlogz": 8.458805665978844,
+ "dlogzerr": 1.1876908430930202,
+ "dlogz_fixed": 26.532815666882925,
+ "moon": {
+  "gp": "GP(amp=1.37792e-05, tau=0.0866078, Q=0.707107, err_scale=1.08019, baseline='offset', gap=0.5)",
+  "logz": -1390.0967848492664,
+  "logzerr": 1.1876693447354387,
+  "ess": 3.4910947670766497,
+  "how": "planet + moon fit (importance sampling ESS too low)"
+ },
+ "planet": {
+  "gp": "GP(amp=1.81665e-05, tau=0.104026, Q=0.707107, err_scale=1.08895, baseline='offset', gap=0.5)",
+  "logz": -1398.5555905152453,
+  "logzerr": 0.007146071837233585,
+  "how": "planet-only fit 0"
+ },
+ "candidates_moon": [
+  {
+   "gp": "GP(amp=9.84414e-06, tau=0.00694449, Q=0.707107, err_scale=0.990442, baseline='offset', gap=0.5)",
+   "logz": -1467.7075317149252,
+   "logzerr": 0.8866359071673422,
+   "how": "fit (fixed h)"
+  },
+  {
+   "gp": "GP(amp=1.37792e-05, tau=0.0866078, Q=0.707107, err_scale=1.08019, baseline='offset', gap=0.5)",
+   "logz": -1390.0967848492664,
+   "logzerr": 1.1876693447354387,
+   "ess": 3.4910947670766497,
+   "how": "planet + moon fit (importance sampling ESS too low)"
+  }
+ ],
+ "candidates_planet": [
+  {
+   "gp": "GP(amp=9.84414e-06, tau=0.00694449, Q=0.707107, err_scale=0.990442, baseline='offset', gap=0.5)",
+   "logz": -1494.240347381808,
+   "logzerr": 0.007936870178317068,
+   "how": "fit (fixed h)"
+  },
+  {
+   "gp": "GP(amp=1.37792e-05, tau=0.0866078, Q=0.707107, err_scale=1.08019, baseline='offset', gap=0.5)",
+   "logz": -1402.704275952938,
+   "logzerr": 0.007936870178317068,
+   "ess": 1530.4324698838425,
+   "how": "importance sampling (moon model's h)"
+  },
+  {
+   "gp": "GP(amp=1.81665e-05, tau=0.104026, Q=0.707107, err_scale=1.08895, baseline='offset', gap=0.5)",
+   "logz": -1398.5555905152453,
+   "logzerr": 0.007146071837233585,
+   "how": "planet-only fit 0"
+  }
+ ],
+ "planet_iterations": [
+  {
+   "gp": "GP(amp=1.81665e-05, tau=0.104026, Q=0.707107, err_scale=1.08895, baseline='offset', gap=0.5)",
+   "logz": -1398.5555905152453,
+   "next": "GP(amp=1.82496e-05, tau=0.105122, Q=0.707107, err_scale=1.08863, baseline='offset', gap=0.5)",
+   "step": 0.010483282215064893
+  }
+ ],
+ "ess_moon": 3.4910947670766497,
+ "seconds": 2232.940608382225
+}

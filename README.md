@@ -74,7 +74,7 @@ See the [characterisation tutorial](https://github.com/hippke/Pandora/blob/main/
 | `pandora_window()` | `(idx, flux_planet, flux_moon, flux_total)` at the output cadences near transit only (flux is 1 elsewhere); `time_sorted=True` for ascending time | own likelihoods, sparse |
 
 ### Searching for moons: detection and characterisation
-Two tutorials (synthetic data with stellar variability and red noise, detrending with wotan, injection and retrieval) show the whole workflow for first-time users: [detection](https://github.com/hippke/Pandora/blob/main/examples/tutorial_detection.ipynb) (a fast test, seconds per light curve) and [characterisation](https://github.com/hippke/Pandora/blob/main/examples/tutorial_characterisation.ipynb) (the full fit).
+Two tutorials (synthetic data with stellar variability and red noise, detrending with wotan, injection and retrieval) show the whole workflow for first-time users: [detection](https://github.com/hippke/Pandora/blob/main/examples/tutorial_detection.ipynb) (a fast test, seconds per light curve) and [characterisation](https://github.com/hippke/Pandora/blob/main/examples/tutorial_characterisation.ipynb) (the full fit). Six [blind retrievals](https://github.com/hippke/Pandora/tree/main/examples/blind_retrievals) of PLATO-like light curves show the analysis of data with unknown content, from data checks to Bayes factors, injection-retrieval sensitivity maps and an assessment of the evidence.
 
 ```
 priors = pandora.default_priors(t0_bary=t0, per_bary=P, r_planet=0.1)        # calibrated moon priors; planet mass from the radius unless given
